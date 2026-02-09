@@ -246,32 +246,27 @@ def main():
 
     # Heat equation parameters (same as individual workflow)
     heat_nus = args.heat_nus or [0.5, 1.0, 3.0]
-    heat_coeff = "heat_coeff_FIXED.json"
     heat_model = "heat_model.pkl"
 
     # Burgers equation parameters (same as individual workflow)
     burgers_train_nus = [0.02, 0.05]
     burgers_test_nus = [0.03, 0.07, 0.12]
-    burgers_coeff = "burgers_coeff_FIXED.json"
-    burgers_model = "burgers_model_3script.pkl"
-    burgers_dataset_train = "burgers_dataset_unified.pkl.gz"
-    burgers_dataset_test = "burgers_dataset_test.pkl.gz"
+    burgers_model = "burgers_model.pkl"
+    burgers_dataset_train = "src/dataset/burgers_dataset_unified.pkl.gz"
+    burgers_dataset_test = "src/dataset/burgers_dataset_test.pkl.gz"
 
     # Cavity parameters (same as individual workflow)
     cavity_model = "cavity_model.pkl"
-    cavity_test_data = "cavity_dataset_test.pkl.gz"
+    cavity_test_data = "src/dataset/cavity_dataset_test.pkl.gz"
 
     methods = ["interpolation", "regression"]
 
     # Heat: operator generation + test (with 2T horizon)
     if "heat" in equations:
-        # Determine training nus from coefficients to avoid regression on seen parameters.
-        with open(heat_coeff, "r") as f:
-            heat_coeff_data = json.load(f)
-        heat_train_nus = [p["nu"] for p in heat_coeff_data["parameters"]]
-        heat_unseen = [nu for nu in heat_nus if nu not in heat_train_nus]
         with open(heat_model, "rb") as f:
             heat_model_data = pickle.load(f)
+        heat_train_nus = [item["nu"] for item in heat_model_data["per_nu_models"]]
+        heat_unseen = [nu for nu in heat_nus if nu not in heat_train_nus]
 
         for method in methods:
             heat_ops_method = heat_ops_dir / method
@@ -288,8 +283,8 @@ def main():
                     [
                         sys.executable,
                         "llm_tool_calling_interpolation.py",
-                        "--coefficients",
-                        heat_coeff,
+                        "--model_pkl",
+                        heat_model,
                         "--query_nu_values",
                         *[str(nu) for nu in heat_unseen],
                         "--provider",
@@ -330,7 +325,7 @@ def main():
 
             for nu in heat_nus:
                 out_path = resolve_operator_path(heat_ops_method, "llm_heat", nu)
-                heat_dataset_test = "heat_dataset_test.pkl.gz"
+                heat_dataset_test = "src/dataset/heat_dataset_test.pkl.gz"
                 test_cmd = [
                     sys.executable,
                     "test_llm_operators_properly.py",
@@ -355,16 +350,15 @@ def main():
 
     # Burgers: operator generation
     if "burgers" in equations:
-        with open(burgers_coeff, "r") as f:
-            burgers_coeff_data = json.load(f)
-        burgers_train_all = [p["nu"] for p in burgers_coeff_data["parameters"]]
         if args.burgers_nus:
             burgers_all = list(args.burgers_nus)
+        with open(burgers_model, "rb") as f:
+            burgers_model_data = pickle.load(f)
+        burgers_train_all = [item["nu"] for item in burgers_model_data["per_nu_models"]]
+        if args.burgers_nus:
             burgers_train_nus = [nu for nu in burgers_all if nu in burgers_train_all]
             burgers_test_nus = [nu for nu in burgers_all if nu not in burgers_train_all]
         burgers_unseen = [nu for nu in burgers_test_nus if nu not in burgers_train_all]
-        with open(burgers_model, "rb") as f:
-            burgers_model_data = pickle.load(f)
 
         for method in methods:
             burgers_ops_method = burgers_ops_dir / method
@@ -381,8 +375,8 @@ def main():
                     [
                         sys.executable,
                         "llm_tool_calling_interpolation.py",
-                        "--coefficients",
-                        burgers_coeff,
+                        "--model_pkl",
+                        burgers_model,
                         "--query_nu_values",
                         *[str(nu) for nu in burgers_unseen],
                         "--provider",
@@ -423,25 +417,28 @@ def main():
                         json.dump(output_data, f, indent=2)
 
             # Burgers: training nu tests (no extended horizon)
-            for nu in burgers_train_nus:
-                out_path = resolve_operator_path(burgers_ops_method, "llm_burgers", nu)
-                run(
-                    [
-                        sys.executable,
-                        "test_llm_operators_properly.py",
-                        "--predicted",
-                        str(out_path),
-                        "--model",
-                        burgers_model,
-                        "--dataset",
-                        burgers_dataset_train,
-                        "--save_plots",
-                        *(["--save_raw"] if args.save_raw else []),
-                        "--output_dir",
-                        str(burgers_results_method),
-                    ],
-                    f"Test burgers operators for nu={nu} (train, {method})",
-                )
+            if Path(burgers_dataset_train).exists():
+                for nu in burgers_train_nus:
+                    out_path = resolve_operator_path(burgers_ops_method, "llm_burgers", nu)
+                    run(
+                        [
+                            sys.executable,
+                            "test_llm_operators_properly.py",
+                            "--predicted",
+                            str(out_path),
+                            "--model",
+                            burgers_model,
+                            "--dataset",
+                            burgers_dataset_train,
+                            "--save_plots",
+                            *(["--save_raw"] if args.save_raw else []),
+                            "--output_dir",
+                            str(burgers_results_method),
+                        ],
+                        f"Test burgers operators for nu={nu} (train, {method})",
+                    )
+            else:
+                print(f"⚠ Skipping burgers train-nu tests; dataset not found: {burgers_dataset_train}")
 
             # Burgers: unseen nu tests (dataset includes 2T horizon)
             for nu in burgers_test_nus:

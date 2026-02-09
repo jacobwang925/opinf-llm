@@ -1,0 +1,4 @@
+# Synthetic prompts for NL parsing (default test configuration)
+Solve the heat equation with nu = 0.5, 1.0, 2.0, 3.0 and report results.
+Solve the burgers equation with nu = 0.02, 0.05, 0.03, 0.07, 0.08, 0.12 and report results.
+Solve the lid-driven cavity with Re = 60, 80, 90, 100, 110, 120, 140, 160 and report results.

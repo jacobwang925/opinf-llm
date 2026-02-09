@@ -26,10 +26,6 @@ Models:
 - `burgers_model.pkl`
 - `cavity_model.pkl`
 
-Coeff JSONs:
-- `heat_coeff_FIXED.json`
-- `burgers_coeff_FIXED.json`
-
 Ablations:
 - `run_heat_ablation.py`
 - `run_burgers_ablation.py`
@@ -43,7 +39,7 @@ From the repo root:
 python run_three_equations_workflow.py --provider openai --model_name gpt-4o --output_dir 3_equations_test_results_gpt4o --save_raw
 ```
 
-### Three‑equation workflow (codegen)
+### Three‑equation workflow (codegen, PKL default)
 ```
 python run_three_equations_workflow_codegen.py --provider openai --model_name gpt-4o --save_raw --save_plots
 ```

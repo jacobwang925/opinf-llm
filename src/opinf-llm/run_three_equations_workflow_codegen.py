@@ -64,10 +64,6 @@ def load_pickle_auto(path: str):
         return pickle.load(f)
 
 
-def load_coeff_json(path: str) -> dict:
-    with open(path, "r") as f:
-        return json.load(f)
-
 
 def extract_code(response_text: str) -> str:
     if "```python" in response_text:
@@ -251,7 +247,6 @@ def write_attempt(attempt_log: Path, payload: dict):
 
 def build_prompt_heat_burgers(
     model_path: str,
-    coeff_path: str | None,
     data_path: str,
     output_path: str,
     method: str,
@@ -259,29 +254,10 @@ def build_prompt_heat_burgers(
     op_shapes: dict,
     phi_shape: tuple,
     error_context: str | None,
-    use_json: bool,
 ):
     extra = ""
     if error_context:
         extra = f"\nPrevious attempt failed with error:\n{error_context}\nFix the issue and regenerate the code."
-
-    coeff_block = ""
-    if use_json and coeff_path:
-        coeff_block = f"""
-COEFFICIENT JSON STRUCTURE (IMPORTANT):
-- JSON file at: {coeff_path}
-- Top-level keys: equation, n_modes, pod_basis_shape, parameters, pod_basis
-- parameters is a list; each item has:
-  * nu (float)
-  * operators: {{A,B,C}} for heat or {{H,A,B,C}} for burgers
-  * operators.<name>.values holds the array
-- pod_basis.values is the POD basis (space x r) to use as phi
-
-When use_json=True:
-- Load operators from the JSON, NOT from per_nu_models in the PKL.
-- Use phi from coeff JSON (pod_basis.values).
-- Use the PKL model ONLY to read x_grid/x_fine for dx.
-"""
 
     return f"""You are an expert Python programmer.
 
@@ -290,9 +266,6 @@ Generate Python code to:
 2) Load case data from: {data_path}
 3) Compute operators for the query parameter using method={method}
 4) Integrate the ROM and save output to: {output_path}
-
-USE_JSON={str(use_json)}
-{coeff_block}
 
 MODEL STRUCTURE (IMPORTANT):
 - pickle with keys: per_nu_models (list of dicts), phi, x_grid or x_fine, t_eval
@@ -464,7 +437,6 @@ def run_codegen_case(
     method: str,
     case_id: str,
     model_path: str,
-    coeff_path: str | None,
     data_path: str,
     output_path: str,
     attempts_dir: Path,
@@ -476,7 +448,6 @@ def run_codegen_case(
     reuse_code: bool,
     op_shapes: dict,
     phi_shape: tuple,
-    use_json: bool,
 ) -> AttemptResult:
     error_context = None
 
@@ -555,7 +526,6 @@ def run_codegen_case(
         else:
             prompt = build_prompt_heat_burgers(
                 model_path,
-                coeff_path,
                 data_path,
                 output_path,
                 method,
@@ -563,7 +533,6 @@ def run_codegen_case(
                 op_shapes,
                 phi_shape,
                 error_context,
-                use_json,
             )
 
         messages = [
@@ -774,12 +743,6 @@ def main():
                         choices=["interpolation", "regression"])
     parser.add_argument("--equations", nargs="+", default=["heat", "burgers", "cavity"],
                         choices=["heat", "burgers", "cavity"])
-    parser.add_argument("--use_pkl_only", action="store_true",
-                        help="Use PKL operators for heat/burgers (legacy behavior).")
-    parser.add_argument("--heat_coeff", type=str, default="heat_coeff_FIXED.json",
-                        help="Heat coefficient JSON (used unless --use_pkl_only).")
-    parser.add_argument("--burgers_coeff", type=str, default="burgers_coeff_FIXED.json",
-                        help="Burgers coefficient JSON (used unless --use_pkl_only).")
     parser.add_argument("--max_attempts_per_case", type=int, default=5)
     parser.add_argument("--sleep_secs", type=float, default=2.0,
                         help="Base sleep (s) after LLM errors; multiplied by attempt index.")
@@ -803,9 +766,6 @@ def main():
     args = parser.parse_args()
 
     model_name = args.model_name or DEFAULT_MODEL_BY_PROVIDER[args.provider]
-    use_json = not args.use_pkl_only
-    heat_coeff_path = args.heat_coeff
-    burgers_coeff_path = args.burgers_coeff
     base_dir = Path(args.output_dir) / model_name
     attempt_log = base_dir / "attempts.jsonl"
     run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -826,42 +786,20 @@ def main():
             t_train = model_data["t_eval"][-1]
             x_grid = model_data.get("x_grid", model_data.get("x_fine"))
             dx = x_grid[1] - x_grid[0]
-            if use_json:
-                coeff_path = heat_coeff_path if equation == "heat" else burgers_coeff_path
-                if not Path(coeff_path).exists():
-                    raise FileNotFoundError(f"Coefficient JSON not found: {coeff_path}")
-                coeff_data = load_coeff_json(coeff_path)
-                phi_shape = tuple(coeff_data["pod_basis_shape"])
-                ops = coeff_data["parameters"][0]["operators"]
-                if equation == "heat":
-                    op_shapes = {
-                        "A": np.array(ops["A"]["values"]).shape,
-                        "B": np.array(ops["B"]["values"]).shape,
-                        "C": np.array(ops["C"]["values"]).shape,
-                    }
-                else:
-                    op_shapes = {
-                        "H": np.array(ops["H"]["values"]).shape,
-                        "A": np.array(ops["A"]["values"]).shape,
-                        "B": np.array(ops["B"]["values"]).shape,
-                        "C": np.array(ops["C"]["values"]).shape,
-                    }
+            phi_shape = model_data["phi"].shape
+            if equation == "heat":
+                op_shapes = {
+                    "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
+                    "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
+                    "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
+                }
             else:
-                coeff_path = None
-                phi_shape = model_data["phi"].shape
-                if equation == "heat":
-                    op_shapes = {
-                        "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
-                        "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
-                        "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
-                    }
-                else:
-                    op_shapes = {
-                        "H": np.array(model_data["per_nu_models"][0]["H"]).shape,
-                        "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
-                        "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
-                        "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
-                    }
+                op_shapes = {
+                    "H": np.array(model_data["per_nu_models"][0]["H"]).shape,
+                    "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
+                    "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
+                    "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
+                }
 
             for method in args.methods:
                 if args.generate_once_per_equation and (equation, method) not in cached_codes:
@@ -880,9 +818,9 @@ def main():
                     seed_attempts_dir = seed_out_dir / f"attempts_{seed_suffix}"
                     seed_result = run_codegen_case(
                         args.provider, model_name, equation, method, seed_suffix,
-                        model_path, coeff_path, str(seed_data_path), str(seed_output_path),
+                        model_path, str(seed_data_path), str(seed_output_path),
                         seed_attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                        None, False, op_shapes, phi_shape, use_json
+                        None, False, op_shapes, phi_shape
                     )
                     if not seed_result.success:
                         print(f"[codegen] seed failed for {equation} {method}; skipping.")
@@ -924,9 +862,9 @@ def main():
 
                         result = run_codegen_case(
                             args.provider, model_name, equation, method, case_suffix,
-                            model_path, coeff_path, str(data_path), str(output_path),
+                            model_path, str(data_path), str(output_path),
                             attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                            cached_code, reuse_flag, op_shapes, phi_shape, use_json
+                            cached_code, reuse_flag, op_shapes, phi_shape
                         )
                         if result.success:
                             try:
@@ -1010,9 +948,9 @@ def main():
                     seed_attempts_dir = seed_out_dir / f"attempts_{seed_suffix}"
                     seed_result = run_codegen_case(
                         args.provider, model_name, "cavity", method, seed_suffix,
-                        model_path, None, str(seed_data_path), str(seed_output_path),
+                        model_path, str(seed_data_path), str(seed_output_path),
                         seed_attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                        None, False, op_shapes, phi_shape, False
+                        None, False, op_shapes, phi_shape
                     )
                     if not seed_result.success:
                         print(f"[codegen] seed failed for cavity {method}; skipping.")
@@ -1052,9 +990,9 @@ def main():
 
                         result = run_codegen_case(
                             args.provider, model_name, "cavity", method, case_suffix,
-                            model_path, None, str(data_path), str(output_path),
+                            model_path, str(data_path), str(output_path),
                             attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                            cached_code, reuse_flag, op_shapes, phi_shape, False
+                            cached_code, reuse_flag, op_shapes, phi_shape
                         )
                         if result.success:
                             try:

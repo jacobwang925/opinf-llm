@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test LLM-Predicted Operators Using Existing Working Framework
+Test LLM-Predicted Operators
 
 This script loads LLM-predicted operators and tests them using the same
 methodology as parametric_heat_3_test_model.py and parametric_burgers_3_test_model.py
@@ -40,7 +40,7 @@ parser.add_argument("--no_use_exact_trained", action="store_true",
 args = parser.parse_args()
 
 print("=" * 70)
-print("Testing LLM-Predicted Operators (Using Working Framework)")
+print("Testing LLM-Predicted Operators")
 print("=" * 70)
 
 # Load predicted operators

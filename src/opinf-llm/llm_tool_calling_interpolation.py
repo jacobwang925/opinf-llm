@@ -20,6 +20,8 @@ Author: Jacob Wang
 import numpy as np
 import json
 import argparse
+import gzip
+import pickle
 from pathlib import Path
 from typing import Dict, List, Any, Literal
 from scipy.interpolate import interp1d
@@ -44,6 +46,39 @@ except ImportError:
 # ============================================================================
 # Tool Functions (LLM can call these)
 # ============================================================================
+
+def load_pickle_auto(path: str):
+    with open(path, "rb") as f:
+        magic = f.read(2)
+        f.seek(0)
+        if magic == b"\x1f\x8b":
+            with gzip.open(path, "rb") as gz:
+                return pickle.load(gz)
+        return pickle.load(f)
+
+
+def coeff_data_from_pkl(model_path: str) -> Dict[str, Any]:
+    model = load_pickle_auto(model_path)
+    per = model["per_nu_models"]
+    has_h = "H" in per[0]
+    equation = "burgers" if has_h else "heat"
+    phi = model["phi"]
+    parameters = []
+    for item in per:
+        ops = {"A": np.array(item["A"]), "B": np.array(item["B"]), "C": np.array(item["C"])}
+        if has_h:
+            ops["H"] = np.array(item["H"])
+        parameters.append({
+            "nu": float(item["nu"]),
+            "operators": {k: {"values": v.tolist()} for k, v in ops.items()},
+        })
+    return {
+        "equation": equation,
+        "n_modes": int(phi.shape[1]),
+        "pod_basis_shape": list(phi.shape),
+        "pod_basis": {"values": phi.tolist()},
+        "parameters": parameters,
+    }
 
 def interpolate_operators(
     nu_train: List[float],
@@ -833,9 +868,6 @@ Examples:
   # Specify different model
   python3 llm_tool_calling_interpolation.py --query_nu 1.0 --model gpt-4o-mini
 
-  # Different equation
-  python3 llm_tool_calling_interpolation.py --coefficients burgers_coefficients.json --query_nu 0.03
-
   # Use Gemini
   python3 llm_tool_calling_interpolation.py --query_nu 1.0 --provider gemini --model gemini-2.0-flash-exp
 
@@ -844,8 +876,8 @@ Examples:
 """
     )
 
-    parser.add_argument("--coefficients", type=str, default="heat_coefficients.json",
-                       help="Path to ROM coefficients JSON")
+    parser.add_argument("--model_pkl", type=str, required=True,
+                       help="Path to OpInf model PKL")
     parser.add_argument("--query_nu", type=float,
                        help="Parameter value to interpolate to")
     parser.add_argument("--query_nu_values", nargs="+", type=float,
@@ -874,7 +906,7 @@ Examples:
     print("=" * 70)
     print("LLM Tool Calling for OpInf Operator Interpolation")
     print("=" * 70)
-    print(f"Coefficients: {args.coefficients}")
+    print(f"Model PKL: {args.model_pkl}")
     if args.query_nu_values:
         print(f"Query ν values: {args.query_nu_values}")
     else:
@@ -885,8 +917,7 @@ Examples:
 
     # Load coefficient data
     print(f"\nLoading coefficients...")
-    with open(args.coefficients, 'r') as f:
-        coeff_data = json.load(f)
+    coeff_data = coeff_data_from_pkl(args.model_pkl)
 
     equation_type = coeff_data.get("equation", "heat")
     nu_train = [p["nu"] for p in coeff_data["parameters"]]

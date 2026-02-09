@@ -21,7 +21,6 @@ from typing import Iterable, List
 import numpy as np
 import re
 
-from save_rom_coefficients import save_heat_coefficients
 from run_three_equations_workflow import compute_split_errors
 
 
@@ -168,7 +167,6 @@ def run_pipeline(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / "heat_model.pkl"
-    coeff_path = output_dir / "heat_coeff.json"
     log_path = output_dir / "ablation_run.log"
 
     if not model_path.exists():
@@ -191,11 +189,9 @@ def run_pipeline(
     else:
         print(f"✓ Using existing model: {model_path}")
 
-    save_heat_coefficients(str(model_path), str(coeff_path))
-
-    with open(coeff_path, "r") as f:
-        coeff_data = json.load(f)
-    train_nus = [p["nu"] for p in coeff_data["parameters"]]
+    with open(model_path, "rb") as f:
+        model_data = pickle.load(f)
+    train_nus = [p["nu"] for p in model_data["per_nu_models"]]
     unseen_nus = [nu for nu in heat_nus if nu not in train_nus]
 
     for method in ["interpolation", "regression"]:
@@ -209,8 +205,8 @@ def run_pipeline(
                 [
                     sys.executable,
                     "llm_tool_calling_interpolation.py",
-                    "--coefficients",
-                    str(coeff_path),
+                    "--model_pkl",
+                    str(model_path),
                     "--query_nu_values",
                     *[str(nu) for nu in unseen_nus],
                     "--provider",
