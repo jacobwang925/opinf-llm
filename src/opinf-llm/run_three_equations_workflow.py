@@ -246,17 +246,17 @@ def main():
 
     # Heat equation parameters (same as individual workflow)
     heat_nus = args.heat_nus or [0.5, 1.0, 3.0]
-    heat_model = "heat_model.pkl"
+    heat_model = "src/opinf-llm/heat_model.pkl"
 
     # Burgers equation parameters (same as individual workflow)
     burgers_train_nus = [0.02, 0.05]
     burgers_test_nus = [0.03, 0.07, 0.12]
-    burgers_model = "burgers_model.pkl"
+    burgers_model = "src/opinf-llm/burgers_model.pkl"
     burgers_dataset_train = "src/dataset/burgers_dataset_unified.pkl.gz"
     burgers_dataset_test = "src/dataset/burgers_dataset_test.pkl.gz"
 
     # Cavity parameters (same as individual workflow)
-    cavity_model = "cavity_model.pkl"
+    cavity_model = "src/opinf-llm/cavity_model.pkl"
     cavity_test_data = "src/dataset/cavity_dataset_test.pkl.gz"
 
     methods = ["interpolation", "regression"]
@@ -282,7 +282,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "llm_tool_calling_interpolation.py",
+                        "src/opinf-llm/llm_tool_calling_interpolation.py",
                         "--model_pkl",
                         heat_model,
                         "--query_nu_values",
@@ -328,7 +328,7 @@ def main():
                 heat_dataset_test = "src/dataset/heat_dataset_test.pkl.gz"
                 test_cmd = [
                     sys.executable,
-                    "test_llm_operators_properly.py",
+                    "src/opinf-llm/test_llm_operators.py",
                     "--predicted",
                     str(out_path),
                     "--model",
@@ -374,7 +374,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "llm_tool_calling_interpolation.py",
+                        "src/opinf-llm/llm_tool_calling_interpolation.py",
                         "--model_pkl",
                         burgers_model,
                         "--query_nu_values",
@@ -423,7 +423,7 @@ def main():
                     run(
                         [
                             sys.executable,
-                            "test_llm_operators_properly.py",
+                            "src/opinf-llm/test_llm_operators.py",
                             "--predicted",
                             str(out_path),
                             "--model",
@@ -446,7 +446,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "test_llm_operators_properly.py",
+                        "src/opinf-llm/test_llm_operators.py",
                         "--predicted",
                         str(out_path),
                         "--model",
@@ -470,7 +470,7 @@ def main():
             cavity_results_method.mkdir(parents=True, exist_ok=True)
             cavity_cmd = [
                 sys.executable,
-                "cavity_2d_3_test_model_parametric_llm.py",
+                "src/opinf-llm/cavity_2d_3_test_model_parametric_llm.py",
                 "--model",
                 cavity_model,
                 "--test_data",

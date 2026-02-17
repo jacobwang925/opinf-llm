@@ -19,7 +19,7 @@ LLM tooling:
 - `load_env.py`
 
 Evaluation helper:
-- `test_llm_operators_properly.py`
+- `test_llm_operators.py`
 
 Models:
 - `heat_model.pkl`

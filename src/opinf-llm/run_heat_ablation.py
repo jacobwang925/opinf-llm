@@ -100,7 +100,7 @@ def run_heat_tests(
         pred_path = resolve_operator_path(ops_dir, "llm_heat", nu)
         cmd = [
             sys.executable,
-            "test_llm_operators_properly.py",
+            "test_llm_operators.py",
             "--predicted",
             str(pred_path),
             "--model",

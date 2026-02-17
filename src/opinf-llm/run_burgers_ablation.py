@@ -111,7 +111,7 @@ def run_burgers_tests(
         dataset = train_dataset if nu in train_set else test_dataset
         cmd = [
             sys.executable,
-            "test_llm_operators_properly.py",
+            "test_llm_operators.py",
             "--predicted",
             str(pred_path),
             "--model",

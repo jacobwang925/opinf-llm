@@ -778,8 +778,8 @@ def main():
     # Heat/Burgers
     for equation in args.equations:
         if equation in ("heat", "burgers"):
-            model_path = "heat_model.pkl" if equation == "heat" else "burgers_model.pkl"
-            dataset_path = "heat_dataset_test.pkl.gz" if equation == "heat" else "burgers_dataset_test.pkl.gz"
+            model_path = "src/opinf-llm/heat_model.pkl" if equation == "heat" else "src/opinf-llm/burgers_model.pkl"
+            dataset_path = "src/dataset/heat_dataset_test.pkl.gz" if equation == "heat" else "src/dataset/burgers_dataset_test.pkl.gz"
             nus = args.heat_nus if equation == "heat" else args.burgers_nus
 
             model_data = load_pickle_auto(model_path)
@@ -913,8 +913,8 @@ def main():
                     }
 
         if equation == "cavity":
-            model_path = "cavity_model.pkl"
-            dataset_path = "cavity_dataset_test.pkl.gz"
+            model_path = "src/opinf-llm/cavity_model.pkl"
+            dataset_path = "src/dataset/cavity_dataset_test.pkl.gz"
             model_data = load_pickle_auto(model_path)
             x = model_data["x"]
             dx = x[1] - x[0]

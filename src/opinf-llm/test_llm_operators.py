@@ -6,8 +6,8 @@ This script loads LLM-predicted operators and tests them using the same
 methodology as parametric_heat_3_test_model.py and parametric_burgers_3_test_model.py
 
 Usage:
-    python test_llm_operators_properly.py --predicted tool_calling_operators_nu0.5.json --model heat_model.pkl
-    python test_llm_operators_properly.py --predicted tool_calling_operators_nu0.01.json --model burgers_model_test.pkl
+    python test_llm_operators.py --predicted tool_calling_operators_nu0.5.json --model heat_model.pkl
+    python test_llm_operators.py --predicted tool_calling_operators_nu0.01.json --model burgers_model_test.pkl
 """
 
 import numpy as np
