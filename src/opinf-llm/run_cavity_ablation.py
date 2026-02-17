@@ -223,7 +223,7 @@ def run_pipeline(
 
         cmd = [
             sys.executable,
-            "cavity_2d_3_test_model_parametric_llm.py",
+            "cavity_test_utility.py",
             "--model",
             str(model_path),
             "--test_data",

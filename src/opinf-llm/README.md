@@ -41,7 +41,7 @@ python run_three_equations_workflow.py --provider openai --model_name gpt-4o --o
 
 ### Three‑equation workflow (codegen, PKL default)
 ```
-python run_three_equations_workflow_codegen.py --provider openai --model_name gpt-4o --save_raw --save_plots
+python run_three_equations_workflow_codegen.py --provider openai --model_name gpt-4o --save_raw --save_plots --reuse_code_per_equation
 ```
 
 ### NL task parser workflow

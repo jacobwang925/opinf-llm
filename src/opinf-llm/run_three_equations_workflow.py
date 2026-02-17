@@ -470,7 +470,7 @@ def main():
             cavity_results_method.mkdir(parents=True, exist_ok=True)
             cavity_cmd = [
                 sys.executable,
-                "src/opinf-llm/cavity_2d_3_test_model_parametric_llm.py",
+                "src/opinf-llm/cavity_test_utility.py",
                 "--model",
                 cavity_model,
                 "--test_data",
