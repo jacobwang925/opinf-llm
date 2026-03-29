@@ -20,6 +20,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -52,6 +53,8 @@ class AttemptResult:
     error: str | None = None
     code_path: Path | None = None
     output_path: Path | None = None
+    failure_status: str | None = None
+    failure_stage: str | None = None
 
 
 def load_pickle_auto(path: str):
@@ -63,6 +66,10 @@ def load_pickle_auto(path: str):
                 return pickle.load(gz)
         return pickle.load(f)
 
+
+def load_coeff_json(path: str) -> dict:
+    with open(path, "r") as f:
+        return json.load(f)
 
 
 def extract_code(response_text: str) -> str:
@@ -77,12 +84,88 @@ def extract_code(response_text: str) -> str:
     return response_text.strip()
 
 
-def inject_paths(code: str, model_path: str, data_path: str, output_path: str) -> str:
+def inject_paths(
+    code: str,
+    model_path: str,
+    data_path: str,
+    output_path: str,
+    coeff_path: str | None = None,
+) -> str:
+    # Rewrite direct variable assignments first so reused code can retarget paths
+    # even when it does not inline paths in np.load()/np.savez() calls.
+    code = re.sub(
+        r'(?m)^(\s*)model_path\s*=\s*[\'"].*?[\'"]',
+        rf'\1model_path = "{model_path}"',
+        code,
+    )
+    code = re.sub(
+        r'(?m)^(\s*)data_path\s*=\s*[\'"].*?[\'"]',
+        rf'\1data_path = "{data_path}"',
+        code,
+    )
+    code = re.sub(
+        r'(?m)^(\s*)output_path\s*=\s*[\'"].*?[\'"]',
+        rf'\1output_path = "{output_path}"',
+        code,
+    )
+    if coeff_path is not None:
+        code = re.sub(
+            r'(?m)^(\s*)(coeff_path|coeff_json_path)\s*=\s*[\'"].*?[\'"]',
+            rf'\1coeff_path = "{coeff_path}"',
+            code,
+        )
     code = re.sub(r'load_pickle_auto\(".*?"\)', f'load_pickle_auto("{model_path}")', code)
     code = re.sub(r'np\.load\(".*?\.npz"\)', f'np.load("{data_path}")', code)
     code = re.sub(r'np\.savez_compressed\(".*?\.npz"', f'np.savez_compressed("{output_path}"', code)
     code = re.sub(r'np\.savez\(".*?\.npz"', f'np.savez("{output_path}"', code)
     return code
+
+
+def aggregate_case_stats(case_outcomes: list[dict]) -> dict:
+    summary: dict[str, Any] = {"overall": {}, "by_equation_method": {}}
+    if not case_outcomes:
+        summary["overall"] = {
+            "n_cases": 0,
+            "opinf_success": 0,
+            "pipeline_success": 0,
+            "opinf_success_rate": None,
+            "pipeline_success_rate": None,
+            "failure_stage_counts": {},
+            "failure_status_counts": {},
+        }
+        return summary
+
+    def build_bucket(records: list[dict]) -> dict:
+        n_cases = len(records)
+        opinf_success = sum(1 for r in records if r.get("opinf_success"))
+        pipeline_success = sum(1 for r in records if r.get("pipeline_success"))
+        failure_stage_counts: dict[str, int] = {}
+        failure_status_counts: dict[str, int] = {}
+        for rec in records:
+            stage = rec.get("failure_stage")
+            status = rec.get("failure_status")
+            if stage:
+                failure_stage_counts[stage] = failure_stage_counts.get(stage, 0) + 1
+            if status:
+                failure_status_counts[status] = failure_status_counts.get(status, 0) + 1
+        return {
+            "n_cases": n_cases,
+            "opinf_success": opinf_success,
+            "pipeline_success": pipeline_success,
+            "opinf_success_rate": float(opinf_success / n_cases),
+            "pipeline_success_rate": float(pipeline_success / n_cases),
+            "failure_stage_counts": failure_stage_counts,
+            "failure_status_counts": failure_status_counts,
+        }
+
+    summary["overall"] = build_bucket(case_outcomes)
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for rec in case_outcomes:
+        key = (rec["equation"], rec["method"])
+        grouped.setdefault(key, []).append(rec)
+    for (equation, method), records in grouped.items():
+        summary["by_equation_method"].setdefault(equation, {})[method] = build_bucket(records)
+    return summary
 
 
 def rel_l2(Y_ref, Y_rom, dx, dt):
@@ -247,6 +330,7 @@ def write_attempt(attempt_log: Path, payload: dict):
 
 def build_prompt_heat_burgers(
     model_path: str,
+    coeff_path: str | None,
     data_path: str,
     output_path: str,
     method: str,
@@ -254,10 +338,30 @@ def build_prompt_heat_burgers(
     op_shapes: dict,
     phi_shape: tuple,
     error_context: str | None,
+    use_json: bool,
 ):
     extra = ""
     if error_context:
         extra = f"\nPrevious attempt failed with error:\n{error_context}\nFix the issue and regenerate the code."
+
+    coeff_block = ""
+    if use_json and coeff_path:
+        coeff_block = f"""
+COEFFICIENT JSON STRUCTURE (IMPORTANT):
+- JSON file at: {coeff_path}
+- Top-level keys: equation, n_modes, pod_basis_shape, parameters, pod_basis
+- parameters is a list; each item has:
+  * nu (float)
+  * operators: {{A,B,C}} for heat or {{H,A,B,C}} for burgers
+  * operators.<name>.values holds the array (always read from this nested key)
+- pod_basis.values is the POD basis (space x r) to use as phi
+
+When use_json=True:
+- Load operators from the JSON, NOT from per_nu_models in the PKL.
+- Use phi from coeff JSON (pod_basis.values).
+- Use the PKL model ONLY to read x_grid/x_fine for dx.
+- Convert loaded operator lists to numeric arrays with np.asarray(..., dtype=float).
+"""
 
     return f"""You are an expert Python programmer.
 
@@ -266,6 +370,9 @@ Generate Python code to:
 2) Load case data from: {data_path}
 3) Compute operators for the query parameter using method={method}
 4) Integrate the ROM and save output to: {output_path}
+
+USE_JSON={str(use_json)}
+{coeff_block}
 
 MODEL STRUCTURE (IMPORTANT):
 - pickle with keys: per_nu_models (list of dicts), phi, x_grid or x_fine, t_eval
@@ -313,7 +420,8 @@ REQUIREMENTS:
 - Save output with EXACT statement:
   np.savez(output_path, Y_ref=Y_ref, Y_rom=Y_rom, t_eval=t_eval, nu=nu_query)
 - Do not print large arrays.
-- Heat-specific shapes: B is (r,), do NOT reshape it to (r,r).
+- Heat-specific shapes: B may be (r,) or (r,1) in training data. Canonicalize with:
+  B = np.asarray(B, dtype=float).reshape(-1), and assert B.shape == (r,).
 - Burgers-specific shapes: B is (r,3). u = [w1(t), w2(t), w3(t)].
 - If Y_ref time length != len(t_eval), resample each spatial row to t_eval using np.interp.
 - U_ref handling:
@@ -437,6 +545,7 @@ def run_codegen_case(
     method: str,
     case_id: str,
     model_path: str,
+    coeff_path: str | None,
     data_path: str,
     output_path: str,
     attempts_dir: Path,
@@ -448,25 +557,31 @@ def run_codegen_case(
     reuse_code: bool,
     op_shapes: dict,
     phi_shape: tuple,
+    use_json: bool,
 ) -> AttemptResult:
     error_context = None
+    last_failure_status = None
+    last_failure_stage = None
 
     if reuse_code and cached_code:
         attempts_dir.mkdir(parents=True, exist_ok=True)
         code_path = attempts_dir / "codegen_reuse.py"
-        code = inject_paths(cached_code, model_path, data_path, output_path)
+        code = inject_paths(cached_code, model_path, data_path, output_path, coeff_path)
         code_path.write_text(code)
         try:
             subprocess.run([sys.executable, str(code_path)], check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             error_context = f"Code exec error (reused): {exc.stderr.strip() or exc.stdout.strip()}"
+            last_failure_status = "reuse_exec_error"
+            last_failure_stage = "opinf_execution"
             write_attempt(attempt_log, {
                 "equation": equation,
                 "case": case_id,
                 "method": method,
                 "attempt": 0,
                 "run_id": run_id,
-                "status": "reuse_exec_error",
+                "status": last_failure_status,
+                "failure_stage": last_failure_stage,
                 "error": error_context,
             })
         else:
@@ -485,13 +600,16 @@ def run_codegen_case(
                         raise ValueError("Non-finite values in output")
                 except Exception as exc:
                     error_context = f"Validation error (reused): {exc}"
+                    last_failure_status = "reuse_validation_error"
+                    last_failure_stage = "opinf_validation"
                     write_attempt(attempt_log, {
                         "equation": equation,
                         "case": case_id,
                         "method": method,
                         "attempt": 0,
                         "run_id": run_id,
-                        "status": "reuse_validation_error",
+                        "status": last_failure_status,
+                        "failure_stage": last_failure_stage,
                         "error": error_context,
                     })
                 else:
@@ -502,20 +620,30 @@ def run_codegen_case(
                         "attempt": 0,
                         "run_id": run_id,
                         "status": "reuse_success",
+                        "failure_stage": None,
                     })
                     return AttemptResult(True, code_path=code_path, output_path=Path(output_path))
             else:
                 error_context = f"Expected output not found (reused): {output_path}"
+                last_failure_status = "reuse_missing_output"
+                last_failure_stage = "pipeline_io"
                 write_attempt(attempt_log, {
                     "equation": equation,
                     "case": case_id,
                     "method": method,
                     "attempt": 0,
                     "run_id": run_id,
-                    "status": "reuse_missing_output",
+                    "status": last_failure_status,
+                    "failure_stage": last_failure_stage,
                     "error": error_context,
                 })
-        return AttemptResult(False, error=error_context, code_path=code_path)
+        return AttemptResult(
+            False,
+            error=error_context,
+            code_path=code_path,
+            failure_status=last_failure_status,
+            failure_stage=last_failure_stage,
+        )
 
     for attempt in range(1, max_attempts + 1):
         print(f"[codegen] {equation} {case_id} {method} attempt {attempt}/{max_attempts}")
@@ -526,6 +654,7 @@ def run_codegen_case(
         else:
             prompt = build_prompt_heat_burgers(
                 model_path,
+                coeff_path,
                 data_path,
                 output_path,
                 method,
@@ -533,6 +662,7 @@ def run_codegen_case(
                 op_shapes,
                 phi_shape,
                 error_context,
+                use_json,
             )
 
         messages = [
@@ -547,13 +677,16 @@ def run_codegen_case(
                 cached_code = code
         except Exception as exc:
             error_context = f"LLM call error: {exc}"
+            last_failure_status = "llm_error"
+            last_failure_stage = "pipeline_llm"
             write_attempt(attempt_log, {
                 "equation": equation,
                 "case": case_id,
                 "method": method,
                 "attempt": attempt,
                 "run_id": run_id,
-                "status": "llm_error",
+                "status": last_failure_status,
+                "failure_stage": last_failure_stage,
                 "error": str(exc),
             })
             if sleep_secs > 0:
@@ -567,13 +700,16 @@ def run_codegen_case(
                 "Code must use the provided data_path for np.load(...) and output_path for np.savez(...). "
                 "Do not hard-code filenames."
             )
+            last_failure_status = "code_contract_error"
+            last_failure_stage = "pipeline_contract"
             write_attempt(attempt_log, {
                 "equation": equation,
                 "case": case_id,
                 "method": method,
                 "attempt": attempt,
                 "run_id": run_id,
-                "status": "code_contract_error",
+                "status": last_failure_status,
+                "failure_stage": last_failure_stage,
                 "error": error_context,
             })
             continue
@@ -586,26 +722,32 @@ def run_codegen_case(
             subprocess.run([sys.executable, str(code_path)], check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             error_context = f"Code exec error: {exc.stderr.strip() or exc.stdout.strip()}"
+            last_failure_status = "exec_error"
+            last_failure_stage = "opinf_execution"
             write_attempt(attempt_log, {
                 "equation": equation,
                 "case": case_id,
                 "method": method,
                 "attempt": attempt,
                 "run_id": run_id,
-                "status": "exec_error",
+                "status": last_failure_status,
+                "failure_stage": last_failure_stage,
                 "error": error_context,
             })
             continue
 
         if not os.path.exists(output_path):
             error_context = f"Expected output not found: {output_path}"
+            last_failure_status = "missing_output"
+            last_failure_stage = "pipeline_io"
             write_attempt(attempt_log, {
                 "equation": equation,
                 "case": case_id,
                 "method": method,
                 "attempt": attempt,
                 "run_id": run_id,
-                "status": "missing_output",
+                "status": last_failure_status,
+                "failure_stage": last_failure_stage,
                 "error": error_context,
             })
             continue
@@ -624,13 +766,16 @@ def run_codegen_case(
                 raise ValueError("Non-finite values in output")
         except Exception as exc:
             error_context = f"Validation error: {exc}"
+            last_failure_status = "validation_error"
+            last_failure_stage = "opinf_validation"
             write_attempt(attempt_log, {
                 "equation": equation,
                 "case": case_id,
                 "method": method,
                 "attempt": attempt,
                 "run_id": run_id,
-                "status": "validation_error",
+                "status": last_failure_status,
+                "failure_stage": last_failure_stage,
                 "error": error_context,
             })
             continue
@@ -642,10 +787,16 @@ def run_codegen_case(
             "attempt": attempt,
             "run_id": run_id,
             "status": "success",
+            "failure_stage": None,
         })
         return AttemptResult(True, code_path=code_path, output_path=Path(output_path))
 
-    return AttemptResult(False, error=error_context)
+    return AttemptResult(
+        False,
+        error=error_context,
+        failure_status=last_failure_status,
+        failure_stage=last_failure_stage,
+    )
 
 
 def plot_heat_burgers(output_path: Path, output_dir: Path, nu: float, equation: str, traj_index: int = 0):
@@ -739,10 +890,18 @@ def main():
                         choices=list(DEFAULT_MODEL_BY_PROVIDER.keys()))
     parser.add_argument("--model_name", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default="codegen")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Run identifier. Default: timestamp YYYYMMDD-HHMMSS")
     parser.add_argument("--methods", nargs="+", default=["interpolation", "regression"],
                         choices=["interpolation", "regression"])
     parser.add_argument("--equations", nargs="+", default=["heat", "burgers", "cavity"],
                         choices=["heat", "burgers", "cavity"])
+    parser.add_argument("--use_pkl_only", action="store_true",
+                        help="Use PKL operators for heat/burgers (legacy behavior).")
+    parser.add_argument("--heat_coeff", type=str, default="heat_coeff_FIXED.json",
+                        help="Heat coefficient JSON (used unless --use_pkl_only).")
+    parser.add_argument("--burgers_coeff", type=str, default="burgers_coeff_FIXED.json",
+                        help="Burgers coefficient JSON (used unless --use_pkl_only).")
     parser.add_argument("--max_attempts_per_case", type=int, default=5)
     parser.add_argument("--sleep_secs", type=float, default=2.0,
                         help="Base sleep (s) after LLM errors; multiplied by attempt index.")
@@ -766,40 +925,67 @@ def main():
     args = parser.parse_args()
 
     model_name = args.model_name or DEFAULT_MODEL_BY_PROVIDER[args.provider]
-    base_dir = Path(args.output_dir) / model_name
+    use_json = not args.use_pkl_only
+    heat_coeff_path = args.heat_coeff
+    burgers_coeff_path = args.burgers_coeff
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    base_dir = Path(args.output_dir) / model_name / run_id
     attempt_log = base_dir / "attempts.jsonl"
-    run_id = time.strftime("%Y%m%d-%H%M%S")
     print(f"[codegen] run_id={run_id}")
+    print(f"[codegen] run_dir={base_dir}")
 
     summary = {"heat": {}, "burgers": {}, "cavity": {}}
+    case_outcomes: list[dict[str, Any]] = []
     cached_codes: dict[tuple[str, str], str] = {}
     cached_case_codes: dict[tuple[str, str, str], str] = {}
 
     # Heat/Burgers
     for equation in args.equations:
         if equation in ("heat", "burgers"):
-            model_path = "src/opinf-llm/heat_model.pkl" if equation == "heat" else "src/opinf-llm/burgers_model.pkl"
-            dataset_path = "src/dataset/heat_dataset_test.pkl.gz" if equation == "heat" else "src/dataset/burgers_dataset_test.pkl.gz"
+            model_path = "heat_model.pkl" if equation == "heat" else "burgers_model.pkl"
+            dataset_path = "heat_dataset_test.pkl.gz" if equation == "heat" else "burgers_dataset_test.pkl.gz"
             nus = args.heat_nus if equation == "heat" else args.burgers_nus
 
             model_data = load_pickle_auto(model_path)
             t_train = model_data["t_eval"][-1]
             x_grid = model_data.get("x_grid", model_data.get("x_fine"))
             dx = x_grid[1] - x_grid[0]
-            phi_shape = model_data["phi"].shape
-            if equation == "heat":
-                op_shapes = {
-                    "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
-                    "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
-                    "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
-                }
+            if use_json:
+                coeff_path = heat_coeff_path if equation == "heat" else burgers_coeff_path
+                if not Path(coeff_path).exists():
+                    raise FileNotFoundError(f"Coefficient JSON not found: {coeff_path}")
+                coeff_data = load_coeff_json(coeff_path)
+                phi_shape = tuple(coeff_data["pod_basis_shape"])
+                ops = coeff_data["parameters"][0]["operators"]
+                if equation == "heat":
+                    op_shapes = {
+                        "A": np.array(ops["A"]["values"]).shape,
+                        "B": np.array(ops["B"]["values"]).shape,
+                        "C": np.array(ops["C"]["values"]).shape,
+                    }
+                else:
+                    op_shapes = {
+                        "H": np.array(ops["H"]["values"]).shape,
+                        "A": np.array(ops["A"]["values"]).shape,
+                        "B": np.array(ops["B"]["values"]).shape,
+                        "C": np.array(ops["C"]["values"]).shape,
+                    }
             else:
-                op_shapes = {
-                    "H": np.array(model_data["per_nu_models"][0]["H"]).shape,
-                    "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
-                    "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
-                    "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
-                }
+                coeff_path = None
+                phi_shape = model_data["phi"].shape
+                if equation == "heat":
+                    op_shapes = {
+                        "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
+                        "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
+                        "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
+                    }
+                else:
+                    op_shapes = {
+                        "H": np.array(model_data["per_nu_models"][0]["H"]).shape,
+                        "A": np.array(model_data["per_nu_models"][0]["A"]).shape,
+                        "B": np.array(model_data["per_nu_models"][0]["B"]).shape,
+                        "C": np.array(model_data["per_nu_models"][0]["C"]).shape,
+                    }
 
             for method in args.methods:
                 if args.generate_once_per_equation and (equation, method) not in cached_codes:
@@ -818,9 +1004,9 @@ def main():
                     seed_attempts_dir = seed_out_dir / f"attempts_{seed_suffix}"
                     seed_result = run_codegen_case(
                         args.provider, model_name, equation, method, seed_suffix,
-                        model_path, str(seed_data_path), str(seed_output_path),
+                        model_path, coeff_path, str(seed_data_path), str(seed_output_path),
                         seed_attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                        None, False, op_shapes, phi_shape
+                        None, False, op_shapes, phi_shape, use_json
                     )
                     if not seed_result.success:
                         print(f"[codegen] seed failed for {equation} {method}; skipping.")
@@ -862,9 +1048,9 @@ def main():
 
                         result = run_codegen_case(
                             args.provider, model_name, equation, method, case_suffix,
-                            model_path, str(data_path), str(output_path),
+                            model_path, coeff_path, str(data_path), str(output_path),
                             attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                            cached_code, reuse_flag, op_shapes, phi_shape
+                            cached_code, reuse_flag, op_shapes, phi_shape, use_json
                         )
                         if result.success:
                             try:
@@ -875,31 +1061,81 @@ def main():
                             except Exception:
                                 pass
                         if not result.success:
+                            case_outcomes.append({
+                                "run_id": run_id,
+                                "equation": equation,
+                                "method": method,
+                                "parameter": float(nu),
+                                "trajectory_index": traj_index + 1,
+                                "case_id": case_suffix,
+                                "opinf_success": False,
+                                "pipeline_success": False,
+                                "failure_stage": result.failure_stage,
+                                "failure_status": result.failure_status,
+                                "error": result.error,
+                            })
                             continue
 
-                        data = np.load(output_path)
-                        Y_ref = data["Y_ref"]
-                        Y_rom = data["Y_rom"]
-                        t_eval_used = data["t_eval"]
-                        dt = t_eval_used[1] - t_eval_used[0]
+                        try:
+                            data = np.load(output_path)
+                            Y_ref = data["Y_ref"]
+                            Y_rom = data["Y_rom"]
+                            t_eval_used = data["t_eval"]
+                            dt = t_eval_used[1] - t_eval_used[0]
 
-                        full_err = rel_l2(Y_ref, Y_rom, dx, dt)
-                        split_idx = np.searchsorted(t_eval_used, t_train)
-                        err_first = None
-                        err_second = None
-                        if 1 < split_idx < Y_ref.shape[1]:
-                            err_first = rel_l2(Y_ref[:, :split_idx], Y_rom[:, :split_idx], dx, dt)
-                            err_second = rel_l2(Y_ref[:, split_idx:], Y_rom[:, split_idx:], dx, dt)
+                            full_err = rel_l2(Y_ref, Y_rom, dx, dt)
+                            split_idx = np.searchsorted(t_eval_used, t_train)
+                            err_first = None
+                            err_second = None
+                            if 1 < split_idx < Y_ref.shape[1]:
+                                err_first = rel_l2(Y_ref[:, :split_idx], Y_rom[:, :split_idx], dx, dt)
+                                err_second = rel_l2(Y_ref[:, split_idx:], Y_rom[:, split_idx:], dx, dt)
 
-                        full_errs.append(full_err)
-                        first_errs.append(err_first)
-                        second_errs.append(err_second)
+                            full_errs.append(full_err)
+                            first_errs.append(err_first)
+                            second_errs.append(err_second)
 
-                        if args.save_plots:
-                            try:
+                            if args.save_plots:
                                 plot_heat_burgers(output_path, out_dir, nu, equation, traj_index)
-                            except Exception as exc:
-                                print(f"[codegen] plot error for {equation} {case_suffix} {method}: {exc}")
+
+                            case_outcomes.append({
+                                "run_id": run_id,
+                                "equation": equation,
+                                "method": method,
+                                "parameter": float(nu),
+                                "trajectory_index": traj_index + 1,
+                                "case_id": case_suffix,
+                                "opinf_success": True,
+                                "pipeline_success": True,
+                                "failure_stage": None,
+                                "failure_status": None,
+                                "error": None,
+                            })
+                        except Exception as exc:
+                            write_attempt(attempt_log, {
+                                "equation": equation,
+                                "case": case_suffix,
+                                "method": method,
+                                "attempt": 0,
+                                "run_id": run_id,
+                                "status": "postproc_error",
+                                "failure_stage": "pipeline_postproc",
+                                "error": f"Postproc error: {exc}",
+                            })
+                            case_outcomes.append({
+                                "run_id": run_id,
+                                "equation": equation,
+                                "method": method,
+                                "parameter": float(nu),
+                                "trajectory_index": traj_index + 1,
+                                "case_id": case_suffix,
+                                "opinf_success": True,
+                                "pipeline_success": False,
+                                "failure_stage": "pipeline_postproc",
+                                "failure_status": "postproc_error",
+                                "error": str(exc),
+                            })
+                            continue
 
                     first_vals = [v for v in first_errs if v is not None]
                     second_vals = [v for v in second_errs if v is not None]
@@ -913,8 +1149,8 @@ def main():
                     }
 
         if equation == "cavity":
-            model_path = "src/opinf-llm/cavity_model.pkl"
-            dataset_path = "src/dataset/cavity_dataset_test.pkl.gz"
+            model_path = "cavity_model_parametric_a0.3_q3.0.pkl"
+            dataset_path = "cavity_dataset_test.pkl.gz"
             model_data = load_pickle_auto(model_path)
             x = model_data["x"]
             dx = x[1] - x[0]
@@ -948,9 +1184,9 @@ def main():
                     seed_attempts_dir = seed_out_dir / f"attempts_{seed_suffix}"
                     seed_result = run_codegen_case(
                         args.provider, model_name, "cavity", method, seed_suffix,
-                        model_path, str(seed_data_path), str(seed_output_path),
+                        model_path, None, str(seed_data_path), str(seed_output_path),
                         seed_attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                        None, False, op_shapes, phi_shape
+                        None, False, op_shapes, phi_shape, False
                     )
                     if not seed_result.success:
                         print(f"[codegen] seed failed for cavity {method}; skipping.")
@@ -990,9 +1226,9 @@ def main():
 
                         result = run_codegen_case(
                             args.provider, model_name, "cavity", method, case_suffix,
-                            model_path, str(data_path), str(output_path),
+                            model_path, None, str(data_path), str(output_path),
                             attempts_dir, args.max_attempts_per_case, args.sleep_secs, attempt_log, run_id,
-                            cached_code, reuse_flag, op_shapes, phi_shape
+                            cached_code, reuse_flag, op_shapes, phi_shape, False
                         )
                         if result.success:
                             try:
@@ -1003,6 +1239,19 @@ def main():
                             except Exception:
                                 pass
                         if not result.success:
+                            case_outcomes.append({
+                                "run_id": run_id,
+                                "equation": "cavity",
+                                "method": method,
+                                "parameter": float(Re),
+                                "trajectory_index": traj_index + 1,
+                                "case_id": case_suffix,
+                                "opinf_success": False,
+                                "pipeline_success": False,
+                                "failure_stage": result.failure_stage,
+                                "failure_status": result.failure_status,
+                                "error": result.error,
+                            })
                             continue
 
                         try:
@@ -1032,6 +1281,19 @@ def main():
 
                             if args.save_plots:
                                 plot_cavity(output_path, out_dir, Re, traj_index)
+                            case_outcomes.append({
+                                "run_id": run_id,
+                                "equation": "cavity",
+                                "method": method,
+                                "parameter": float(Re),
+                                "trajectory_index": traj_index + 1,
+                                "case_id": case_suffix,
+                                "opinf_success": True,
+                                "pipeline_success": True,
+                                "failure_stage": None,
+                                "failure_status": None,
+                                "error": None,
+                            })
                         except Exception as exc:
                             write_attempt(attempt_log, {
                                 "equation": "cavity",
@@ -1040,7 +1302,21 @@ def main():
                                 "attempt": 0,
                                 "run_id": run_id,
                                 "status": "postproc_error",
+                                "failure_stage": "pipeline_postproc",
                                 "error": f"Postproc error: {exc}",
+                            })
+                            case_outcomes.append({
+                                "run_id": run_id,
+                                "equation": "cavity",
+                                "method": method,
+                                "parameter": float(Re),
+                                "trajectory_index": traj_index + 1,
+                                "case_id": case_suffix,
+                                "opinf_success": True,
+                                "pipeline_success": False,
+                                "failure_stage": "pipeline_postproc",
+                                "failure_status": "postproc_error",
+                                "error": str(exc),
                             })
                             continue
 
@@ -1060,6 +1336,19 @@ def main():
     with summary_path.open("w") as f:
         json.dump(summary, f, indent=2)
     print(f"\nSaved split-error summary to: {summary_path}")
+
+    outcomes_path = base_dir / f"case_outcomes_{run_id}.jsonl"
+    with outcomes_path.open("w") as f:
+        for rec in case_outcomes:
+            f.write(json.dumps(rec) + "\n")
+    print(f"Saved case outcomes to: {outcomes_path}")
+
+    success_summary = aggregate_case_stats(case_outcomes)
+    success_summary["run_id"] = run_id
+    success_summary_path = base_dir / "summary_success_rates.json"
+    with success_summary_path.open("w") as f:
+        json.dump(success_summary, f, indent=2)
+    print(f"Saved success-rate summary to: {success_summary_path}")
 
 
 if __name__ == "__main__":
