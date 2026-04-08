@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Burgers-only ablation runner for POD modes and OpInf ridge alpha.
+Heat-only ablation runner for POD modes and OpInf ridge alpha.
 
 Runs two ablations:
 1) POD modes sweep with fixed ridge alpha.
@@ -18,23 +18,17 @@ import sys
 from pathlib import Path
 from typing import Iterable, List
 
+import numpy as np
 import re
 
 from run_three_equations_workflow import compute_split_errors
 
 
-DEFAULT_BURGERS_NUS = [0.03, 0.07]
+DEFAULT_HEAT_NUS = [0.5, 1.0, 3.0]
 
 
 def run(cmd: List[str], desc: str, allow_fail: bool = False, log_path: Path | None = None) -> None:
     print(f"\n==> {desc}")
-    if not cmd:
-        if log_path is not None:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "a") as log_file:
-                log_file.write(f"\n==> {desc}\n")
-                log_file.write("exit_code=skipped\n")
-        return
     print(" ".join(cmd))
     if allow_fail:
         result = subprocess.run(cmd, check=False, capture_output=True, text=True)
@@ -75,7 +69,7 @@ def write_exact_operators(model_path: Path, output_dir: Path) -> None:
 
     for item in model_data["per_nu_models"]:
         nu = item["nu"]
-        out_path = output_dir / f"llm_burgers_nu{nu}.json"
+        out_path = output_dir / f"llm_heat_nu{nu}.json"
         if out_path.exists():
             continue
         output_data = {
@@ -83,7 +77,6 @@ def write_exact_operators(model_path: Path, output_dir: Path) -> None:
             "predicted_operators": {
                 "nu": nu,
                 "operators": {
-                    "H": item["H"].tolist(),
                     "A": item["A"].tolist(),
                     "B": item["B"].tolist(),
                     "C": item["C"].tolist(),
@@ -94,24 +87,20 @@ def write_exact_operators(model_path: Path, output_dir: Path) -> None:
             json.dump(output_data, f, indent=2)
 
 
-def run_burgers_tests(
+def run_heat_tests(
     model_path: Path,
-    train_dataset: Path | None,
     test_dataset: Path | None,
     output_dir: Path,
     ops_dir: Path,
     nus: Iterable[float],
-    train_nus: Iterable[float],
     save_raw: bool,
     log_path: Path | None,
 ) -> None:
-    train_set = set(train_nus)
     for nu in nus:
-        pred_path = resolve_operator_path(ops_dir, "llm_burgers", nu)
-        dataset = train_dataset if nu in train_set else test_dataset
+        pred_path = resolve_operator_path(ops_dir, "llm_heat", nu)
         cmd = [
             sys.executable,
-            "test_llm_operators.py",
+            "src/test_llm_operators.py",
             "--predicted",
             str(pred_path),
             "--model",
@@ -119,29 +108,31 @@ def run_burgers_tests(
             "--save_plots",
             "--output_dir",
             str(output_dir),
+            "--test_T_factor",
+            "2.0",
         ]
         if save_raw:
             cmd.append("--save_raw")
-        if dataset and dataset.exists():
-            cmd += ["--dataset", str(dataset)]
-        run(cmd, f"Test burgers operators for nu={nu}", allow_fail=True, log_path=log_path)
+        if test_dataset and test_dataset.exists():
+            cmd += ["--dataset", str(test_dataset)]
+        run(cmd, f"Test heat operators for nu={nu}", allow_fail=True, log_path=log_path)
 
 
-def summarize_burgers_results(model_path: Path, base_dir: Path) -> None:
+def summarize_heat_results(model_path: Path, base_dir: Path) -> None:
     with open(model_path, "rb") as f:
         model_data = pickle.load(f)
 
     t_train = model_data["t_eval"][-1]
-    x_grid = model_data["x_fine"]
+    x_grid = model_data["x_grid"]
     dx = x_grid[1] - x_grid[0]
 
-    summary = {"burgers": {}}
+    summary = {"heat": {}}
     for method in ["interpolation", "regression"]:
-        folder = base_dir / "burgers_test_results" / method
+        folder = base_dir / "heat_test_results" / method
         if not folder.exists():
             continue
         by_param = {}
-        for raw_path in sorted(folder.glob("llm_burgers_nu*_raw.npz")):
+        for raw_path in sorted(folder.glob("llm_heat_nu*_raw.npz")):
             name = raw_path.name
             match = re.search(r"nu([0-9.]+)", name)
             if not match:
@@ -152,7 +143,7 @@ def summarize_burgers_results(model_path: Path, base_dir: Path) -> None:
                 continue
             by_param.setdefault(nu_val, []).append(raw_path)
         for nu_val, files in by_param.items():
-            summary["burgers"].setdefault(method, {})[str(nu_val)] = compute_split_errors(
+            summary["heat"].setdefault(method, {})[str(nu_val)] = compute_split_errors(
                 files, dx, t_train
             )
 
@@ -164,26 +155,25 @@ def summarize_burgers_results(model_path: Path, base_dir: Path) -> None:
 
 def run_pipeline(
     dataset: Path,
-    train_dataset: Path,
     test_dataset: Path,
     output_dir: Path,
     n_modes: int,
     ridge_alpha: float,
     provider: str,
     model_name: str,
-    burgers_nus: Iterable[float],
+    heat_nus: Iterable[float],
     reuse_operators: bool,
     save_raw: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / "burgers_model.pkl"
+    model_path = output_dir / "heat_model.pkl"
     log_path = output_dir / "ablation_run.log"
 
     if not model_path.exists():
         run(
             [
                 sys.executable,
-                "parametric_burgers_2_train_model.py",
+                "dataset/parametric_heat_2_train_model.py",
                 "--dataset",
                 str(dataset),
                 "--n_modes",
@@ -193,29 +183,20 @@ def run_pipeline(
                 "--output",
                 str(model_path),
             ],
-            f"Train burgers model (r={n_modes}, alpha={ridge_alpha})",
-            allow_fail=True,
+            f"Train heat model (r={n_modes}, alpha={ridge_alpha})",
             log_path=log_path,
         )
-        if not model_path.exists():
-            run(
-                [],
-                "Training failed; skipping this setting",
-                allow_fail=True,
-                log_path=log_path,
-            )
-            return
     else:
         print(f"✓ Using existing model: {model_path}")
 
     with open(model_path, "rb") as f:
         model_data = pickle.load(f)
     train_nus = [p["nu"] for p in model_data["per_nu_models"]]
-    unseen_nus = [nu for nu in burgers_nus if nu not in train_nus]
+    unseen_nus = [nu for nu in heat_nus if nu not in train_nus]
 
     for method in ["interpolation", "regression"]:
-        ops_dir = output_dir / "operators" / "burgers" / method
-        results_dir = output_dir / "burgers_test_results" / method
+        ops_dir = output_dir / "operators" / "heat" / method
+        results_dir = output_dir / "heat_test_results" / method
         ops_dir.mkdir(parents=True, exist_ok=True)
         results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -223,7 +204,7 @@ def run_pipeline(
             run(
                 [
                     sys.executable,
-                    "llm_tool_calling_interpolation.py",
+                    "src/llm_tool_calling_interpolation.py",
                     "--model_pkl",
                     str(model_path),
                     "--query_nu_values",
@@ -235,26 +216,16 @@ def run_pipeline(
                     "--method",
                     method,
                     "--output",
-                    str(ops_dir / f"llm_burgers_{method}_batch.json"),
+                    str(ops_dir / f"llm_heat_{method}_batch.json"),
                 ],
-                f"Generate burgers operators (batch, {method})",
+                f"Generate heat operators (batch, {method})",
                 log_path=log_path,
             )
         write_exact_operators(model_path, ops_dir)
-        run_burgers_tests(
-            model_path,
-            train_dataset,
-            test_dataset,
-            results_dir,
-            ops_dir,
-            burgers_nus,
-            train_nus,
-            save_raw,
-            log_path,
-        )
+        run_heat_tests(model_path, test_dataset, results_dir, ops_dir, heat_nus, save_raw, log_path)
 
     if save_raw:
-        summarize_burgers_results(model_path, output_dir)
+        summarize_heat_results(model_path, output_dir)
 
 
 def parse_list(values: str) -> List[float]:
@@ -262,27 +233,25 @@ def parse_list(values: str) -> List[float]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run burgers-only ablation studies.")
-    parser.add_argument("--dataset", type=str, default="burgers_dataset_unified.pkl.gz")
-    parser.add_argument("--train_dataset", type=str, default="burgers_dataset_train.pkl.gz")
-    parser.add_argument("--test_dataset", type=str, default="burgers_dataset_test.pkl.gz")
+    parser = argparse.ArgumentParser(description="Run heat-only ablation studies.")
+    parser.add_argument("--dataset", type=str, default="dataset/heat_dataset_unified.pkl.gz")
+    parser.add_argument("--test_dataset", type=str, default="dataset/heat_dataset_test.pkl.gz")
     parser.add_argument("--provider", type=str, default="openai")
     parser.add_argument("--model_name", type=str, default="gpt-4o")
-    parser.add_argument("--output_dir_base", type=str, default="burgers_ablation_results")
-    parser.add_argument("--burgers_nus", type=str, default="0.03,0.07")
+    parser.add_argument("--output_dir_base", type=str, default="heat_ablation_results")
+    parser.add_argument("--heat_nus", type=str, default="0.5,1.0,3.0")
     parser.add_argument("--reuse_operators", action="store_true")
     parser.add_argument("--save_raw", action="store_true")
     parser.add_argument("--pod_modes", type=str, default="4,5,6,7,8,9,10")
     parser.add_argument("--alpha_values", type=str, default="0,1e-6,1e-5,1e-4,1e-3,1e-2,1e-1,1,10")
-    parser.add_argument("--default_alpha", type=float, default=0.5)
+    parser.add_argument("--default_alpha", type=float, default=1e-4)
     parser.add_argument("--default_pod", type=int, default=6)
     args = parser.parse_args()
 
     dataset = Path(args.dataset)
-    train_dataset = Path(args.train_dataset)
     test_dataset = Path(args.test_dataset)
     output_base = Path(args.output_dir_base)
-    burgers_nus = parse_list(args.burgers_nus)
+    heat_nus = parse_list(args.heat_nus)
 
     pod_modes = [int(v) for v in args.pod_modes.split(",") if v.strip()]
     alpha_values = parse_list(args.alpha_values)
@@ -292,14 +261,13 @@ def main() -> None:
         out_dir = output_base / "pod_modes" / f"pod_{r}"
         run_pipeline(
             dataset=dataset,
-            train_dataset=train_dataset,
             test_dataset=test_dataset,
             output_dir=out_dir,
             n_modes=r,
             ridge_alpha=args.default_alpha,
             provider=args.provider,
             model_name=args.model_name,
-            burgers_nus=burgers_nus,
+            heat_nus=heat_nus,
             reuse_operators=args.reuse_operators,
             save_raw=args.save_raw,
         )
@@ -309,14 +277,13 @@ def main() -> None:
         out_dir = output_base / "alpha" / f"alpha_{safe_tag(alpha)}"
         run_pipeline(
             dataset=dataset,
-            train_dataset=train_dataset,
             test_dataset=test_dataset,
             output_dir=out_dir,
             n_modes=args.default_pod,
             ridge_alpha=alpha,
             provider=args.provider,
             model_name=args.model_name,
-            burgers_nus=burgers_nus,
+            heat_nus=heat_nus,
             reuse_operators=args.reuse_operators,
             save_raw=args.save_raw,
         )

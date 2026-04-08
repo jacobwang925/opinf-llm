@@ -35,6 +35,9 @@ DEFAULT_MODEL_BY_PROVIDER = {
 }
 
 EQUATION_CHOICES = {"heat", "burgers", "cavity"}
+TEST_HEAT_NUS = [0.5, 1.0, 3.0]
+TEST_BURGERS_NUS = [0.03, 0.07]
+TEST_CAVITY_RES = [60.0, 80.0, 90.0, 110.0, 120.0, 140.0]
 
 
 def _parse_json_from_text(text: Any) -> Optional[Dict[str, Any]]:
@@ -104,6 +107,29 @@ def normalize_config(
     default_save_raw: bool,
     default_reuse: bool,
 ) -> Dict[str, Any]:
+    def _coerce_test_list(values: Any, allowed: List[float]) -> List[float]:
+        if values is None:
+            return list(allowed)
+        if isinstance(values, (int, float)):
+            values = [values]
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            return list(allowed)
+        out: List[float] = []
+        for v in values:
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if any(abs(fv - a) < 1e-12 for a in allowed):
+                out.append(fv)
+        if not out:
+            return list(allowed)
+        # unique + stable sorted order
+        uniq = sorted({float(v) for v in out})
+        return uniq
+
     def _coerce_bool(value: Any) -> Optional[bool]:
         if value is None:
             return None
@@ -143,9 +169,9 @@ def normalize_config(
         "output_dir": output_dir,
         "save_raw": bool(save_raw),
         "reuse_operators": bool(reuse_operators),
-        "heat_nus": parsed.get("heat_nus"),
-        "burgers_nus": parsed.get("burgers_nus"),
-        "cavity_res": parsed.get("cavity_res"),
+        "heat_nus": _coerce_test_list(parsed.get("heat_nus"), TEST_HEAT_NUS),
+        "burgers_nus": _coerce_test_list(parsed.get("burgers_nus"), TEST_BURGERS_NUS),
+        "cavity_res": _coerce_test_list(parsed.get("cavity_res"), TEST_CAVITY_RES),
     }
 
 
@@ -153,6 +179,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Parse NL prompts into workflow configs.")
     parser.add_argument("--prompt", type=str, help="Single prompt string")
     parser.add_argument("--prompts_file", type=str, help="Path to prompts file (one per line)")
+    parser.add_argument("--provider", type=str, default=None,
+                        choices=["openai", "gemini", "deepseek", "anthropic", "qwen"],
+                        help="Unified provider for both parser and workflow.")
+    parser.add_argument("--model_name", type=str, default=None,
+                        help="Unified model name for both parser and workflow.")
     parser.add_argument("--parser_provider", type=str, default="openai",
                         choices=["openai", "gemini", "deepseek", "anthropic", "qwen"])
     parser.add_argument("--parser_model", type=str, default=None,
@@ -161,15 +192,25 @@ def main() -> None:
                         choices=["openai", "gemini", "deepseek", "anthropic", "qwen"])
     parser.add_argument("--default_model", type=str, default=None,
                         help="Default workflow model (overrides provider default)")
-    parser.add_argument("--output_dir_base", type=str, default="nl_workflow_runs")
-    parser.add_argument("--save_raw", action="store_true", help="Default save_raw if not parsed")
+    parser.add_argument("--output_dir_base", type=str, default="nl_runs")
+    parser.add_argument("--save_raw", dest="save_raw_override", action="store_true",
+                        help="Force save_raw=True in workflow runs.")
     parser.add_argument("--reuse_operators", action="store_true", help="Default reuse_operators if not parsed")
-    parser.add_argument("--execute", action="store_true", help="Execute workflow for each prompt")
-    parser.add_argument("--merge_prompts", action="store_true",
-                        help="Merge parsed prompts into a single workflow run")
+    parser.add_argument("--execute", dest="execute", action="store_true",
+                        help="Execute workflow for parsed config(s). Default: enabled.")
+    parser.add_argument("--no_execute", dest="execute", action="store_false",
+                        help="Do not execute workflow; only print parsed config(s).")
+    parser.add_argument("--merge_prompts", dest="merge_prompts", action="store_true",
+                        help="Merge parsed prompts into a single workflow run. Default: enabled.")
+    parser.add_argument("--no_merge_prompts", dest="merge_prompts", action="store_false",
+                        help="Do not merge prompts; run one config per prompt.")
+    parser.set_defaults(execute=True, merge_prompts=True, save_raw_override=None)
     args = parser.parse_args()
 
-    parser_model = args.parser_model or DEFAULT_MODEL_BY_PROVIDER[args.parser_provider]
+    parser_provider = args.provider or args.parser_provider
+    default_provider = args.provider or args.default_provider
+    parser_model = args.model_name or args.parser_model or DEFAULT_MODEL_BY_PROVIDER[parser_provider]
+    default_model = args.model_name or args.default_model or DEFAULT_MODEL_BY_PROVIDER[default_provider]
 
     prompts: List[str] = []
     if args.prompt:
@@ -193,31 +234,43 @@ def main() -> None:
 
     configs = []
     for idx, prompt in enumerate(prompts, start=1):
-        parsed = parse_prompt_with_llm(prompt, args.parser_provider, parser_model)
+        parsed = parse_prompt_with_llm(prompt, parser_provider, parser_model)
         config = normalize_config(
             parsed,
-            default_provider=args.default_provider,
-            default_model=args.default_model,
+            default_provider=default_provider,
+            default_model=default_model,
             output_dir_base=args.output_dir_base,
             index=idx,
-            default_save_raw=args.save_raw,
+            default_save_raw=bool(args.save_raw_override) if args.save_raw_override is not None else False,
             default_reuse=args.reuse_operators,
         )
-        if not str(config["output_dir"]).endswith("_parsed"):
-            config["output_dir"] = f"{config['output_dir']}_parsed"
+        if args.save_raw_override is not None:
+            config["save_raw"] = bool(args.save_raw_override)
         configs.append(config)
 
     if args.merge_prompts and configs:
+        merged_heat = sorted({
+            float(v) for c in configs for v in (c.get("heat_nus") or [])
+            if any(abs(float(v) - a) < 1e-12 for a in TEST_HEAT_NUS)
+        }) or list(TEST_HEAT_NUS)
+        merged_burgers = sorted({
+            float(v) for c in configs for v in (c.get("burgers_nus") or [])
+            if any(abs(float(v) - a) < 1e-12 for a in TEST_BURGERS_NUS)
+        }) or list(TEST_BURGERS_NUS)
+        merged_cavity = sorted({
+            float(v) for c in configs for v in (c.get("cavity_res") or [])
+            if any(abs(float(v) - a) < 1e-12 for a in TEST_CAVITY_RES)
+        }) or list(TEST_CAVITY_RES)
         merged = {
             "equations": sorted({e for c in configs for e in c.get("equations", [])}),
             "provider": configs[0]["provider"],
             "model_name": configs[0]["model_name"],
-            "output_dir": f"{args.output_dir_base}_parsed",
-            "save_raw": any(c.get("save_raw") for c in configs),
+            "output_dir": args.output_dir_base,
+            "save_raw": bool(args.save_raw_override) if args.save_raw_override is not None else any(c.get("save_raw") for c in configs),
             "reuse_operators": any(c.get("reuse_operators") for c in configs),
-            "heat_nus": sorted({v for c in configs for v in (c.get("heat_nus") or [])}),
-            "burgers_nus": sorted({v for c in configs for v in (c.get("burgers_nus") or [])}),
-            "cavity_res": sorted({v for c in configs for v in (c.get("cavity_res") or [])}),
+            "heat_nus": merged_heat,
+            "burgers_nus": merged_burgers,
+            "cavity_res": merged_cavity,
         }
         configs = [merged]
 
@@ -229,7 +282,7 @@ def main() -> None:
     for config in configs:
         cmd = [
             sys.executable,
-            "run_three_equations_workflow.py",
+            "src/run_three_equations_workflow.py",
             "--provider",
             config["provider"],
             "--model_name",

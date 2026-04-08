@@ -405,7 +405,7 @@ def save_heat_burgers_plot(
     plt.colorbar(im1, ax=axes[1])
 
     err = np.abs(y_ref - y_pred)
-    im2 = axes[2].pcolormesh(t_mesh, x_mesh, err, cmap="viridis", shading="auto")
+    im2 = axes[2].pcolormesh(t_mesh, x_mesh, err, cmap="YlOrRd", shading="auto")
     axes[2].set_title(f"{title_prefix} |Error|")
     axes[2].set_xlabel("t")
     axes[2].set_ylabel("x")
@@ -457,8 +457,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run pure-LLM baseline with downsampled outputs.")
     parser.add_argument("--provider", type=str, default="openai")
     parser.add_argument("--model_name", type=str, default="gpt-4o")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Run identifier. Default: timestamp YYYYMMDD-HHMMSS")
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--output_dir_base", type=str, default="pure_llm_baseline_results")
+    parser.add_argument("--output_dir_base", type=str, default="llm_runs")
     parser.add_argument("--prompt_dir", type=str, default=None)
     parser.add_argument("--prompt_dir_base", type=str, default="pure_llm_baseline_prompts")
     parser.add_argument("--execute", action="store_true")
@@ -485,19 +487,22 @@ def main() -> None:
         import os
         os.environ["LLM_REQUEST_TIMEOUT"] = str(args.request_timeout)
     safe_model = re.sub(r"[^a-zA-Z0-9._-]+", "_", args.model_name)
-    out_dir = Path(args.output_dir) if args.output_dir else Path(f"{args.output_dir_base}_{safe_model}")
-    prompt_dir = Path(args.prompt_dir) if args.prompt_dir else Path(f"{args.prompt_dir_base}_{safe_model}")
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    out_dir = Path(args.output_dir) if args.output_dir else Path(args.output_dir_base) / safe_model / run_id
+    prompt_dir = Path(args.prompt_dir) if args.prompt_dir else (out_dir / "prompts")
     raw_dir = out_dir / "raw"
     plot_dir = out_dir / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[pure-llm] run_id={run_id}")
+    print(f"[pure-llm] run_dir={out_dir}")
 
     results: List[CaseResult] = []
     failures: List[Dict[str, Any]] = []
     attempt_log: List[Dict[str, Any]] = []
 
-    heat_data = load_pickle_auto(Path("heat_dataset_test.pkl.gz"))
-    burgers_data = load_pickle_auto(Path("burgers_dataset_test.pkl.gz"))
-    cavity_data = load_pickle_auto(Path("cavity_dataset_test.pkl.gz"))
+    heat_data = load_pickle_auto(Path("dataset/heat_dataset_test.pkl.gz"))
+    burgers_data = load_pickle_auto(Path("dataset/burgers_dataset_test.pkl.gz"))
+    cavity_data = load_pickle_auto(Path("dataset/cavity_dataset_test.pkl.gz"))
 
     heat_nus = args.heat_nus or HEAT_NUS
     burgers_nus = args.burgers_nus or BURGERS_NUS

@@ -15,6 +15,7 @@ from pathlib import Path
 import json
 import pickle
 import re
+import time
 
 
 DEFAULT_MODEL_BY_PROVIDER = {
@@ -24,6 +25,10 @@ DEFAULT_MODEL_BY_PROVIDER = {
     "anthropic": "claude-sonnet-4-20250514",
     "qwen": "qwen-plus",
 }
+
+DEFAULT_HEAT_NUS = [0.5, 1.0, 3.0]
+DEFAULT_BURGERS_NUS = [0.03, 0.07]
+DEFAULT_CAVITY_RES = [60.0, 80.0, 90.0, 110.0, 120.0, 140.0]
 
 
 def run(cmd, desc):
@@ -140,6 +145,15 @@ def write_summary_split_errors(base_dir, heat_model, burgers_model, cavity_model
 
     base_dir = Path(base_dir)
     summary = {"heat": {}, "burgers": {}, "cavity": {}}
+    # Align interpolation reporting with codegen defaults; regression reports all params.
+    interpolation_report = {
+        "heat": [0.5, 1.0, 3.0],
+        "burgers": [0.03, 0.07],
+        "cavity": [60.0, 80.0, 90.0, 110.0, 120.0, 140.0],
+    }
+
+    def in_report_set(eq: str, value: float) -> bool:
+        return any(abs(float(value) - float(v)) < 1e-12 for v in interpolation_report[eq])
 
     # Heat/Burgers
     for eq, model_path in [("heat", heat_model), ("burgers", burgers_model)]:
@@ -149,8 +163,12 @@ def write_summary_split_errors(base_dir, heat_model, burgers_model, cavity_model
         x_grid = model_data.get("x_grid", model_data.get("x_fine"))
         dx = x_grid[1] - x_grid[0]
         for method in ["interpolation", "regression"]:
-            folder = base_dir / f"{eq}_test_results" / method
-            if not folder.exists():
+            folder_candidates = [
+                base_dir / eq / method / "results",
+                base_dir / f"{eq}_test_results" / method,  # backward compatibility
+            ]
+            folder = next((p for p in folder_candidates if p.exists()), None)
+            if folder is None:
                 continue
             by_param = {}
             for raw_path in sorted(folder.glob(f"llm_{eq}_nu*_raw.npz")):
@@ -161,6 +179,8 @@ def write_summary_split_errors(base_dir, heat_model, burgers_model, cavity_model
                 nu_val = float(nu_match.group(1))
                 by_param.setdefault(nu_val, []).append(raw_path)
             for nu_val, files in by_param.items():
+                if not in_report_set(eq, nu_val):
+                    continue
                 summary[eq].setdefault(method, {})[str(nu_val)] = compute_split_errors(
                     files, dx, t_train
                 )
@@ -173,8 +193,12 @@ def write_summary_split_errors(base_dir, heat_model, burgers_model, cavity_model
     dx = x[1] - x[0]
     dA = dx * dx
     for method in ["interpolation", "regression"]:
-        folder = base_dir / "cavity_test_results" / method
-        if not folder.exists():
+        folder_candidates = [
+            base_dir / "cavity" / method / "results",
+            base_dir / "cavity_test_results" / method,  # backward compatibility
+        ]
+        folder = next((p for p in folder_candidates if p.exists()), None)
+        if folder is None:
             continue
         by_re = {}
         for raw_path in sorted(folder.glob("cavity_Re*_traj*_raw.npz")):
@@ -183,7 +207,10 @@ def write_summary_split_errors(base_dir, heat_model, burgers_model, cavity_model
                 continue
             re_val = float(match.group(1))
             by_re.setdefault(re_val, []).append(raw_path)
-        for re_val, files in by_re.items():
+        for re_val in sorted(by_re.keys()):
+            files = by_re[re_val]
+            if not in_report_set("cavity", re_val):
+                continue
             # Build combined Y to use the same rel_l2 helper
             summary["cavity"].setdefault(method, {})[str(re_val)] = compute_split_errors_cavity(
                 files, dA, t_train
@@ -202,16 +229,18 @@ def main():
                         help="LLM provider")
     parser.add_argument("--model_name", type=str, default=None,
                         help="LLM model name (default depends on provider)")
-    parser.add_argument("--output_dir", type=str, default="3_equations_test_results",
-                        help="Base output directory")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Run identifier. Default: timestamp YYYYMMDD-HHMMSS")
+    parser.add_argument("--output_dir", type=str, default="tool_call_runs",
+                        help="Base output root. Results saved under <output_dir>/<model>/<run_id>/")
     parser.add_argument("--equations", nargs="+", default=["heat", "burgers", "cavity"],
                         choices=["heat", "burgers", "cavity"],
                         help="Equations to run (default: all)")
-    parser.add_argument("--heat_nus", nargs="+", type=float, default=None,
+    parser.add_argument("--heat_nus", nargs="+", type=float, default=DEFAULT_HEAT_NUS,
                         help="Override heat nu values (comma-separated list)")
-    parser.add_argument("--burgers_nus", nargs="+", type=float, default=None,
+    parser.add_argument("--burgers_nus", nargs="+", type=float, default=DEFAULT_BURGERS_NUS,
                         help="Override burgers nu values (comma-separated list)")
-    parser.add_argument("--cavity_res", nargs="+", type=float, default=None,
+    parser.add_argument("--cavity_res", nargs="+", type=float, default=DEFAULT_CAVITY_RES,
                         help="Override cavity Re values (comma-separated list)")
     parser.add_argument("--reuse_operators", action="store_true",
                         help="Reuse existing operator JSONs when available")
@@ -222,42 +251,32 @@ def main():
     args = parser.parse_args()
 
     model_name = args.model_name or DEFAULT_MODEL_BY_PROVIDER[args.provider]
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
 
-    base_dir = Path(args.output_dir)
+    base_dir = Path(args.output_dir) / model_name / run_id
+    print(f"[tool-call] run_id={run_id}")
+    print(f"[tool-call] run_dir={base_dir}")
     equations = set(args.equations)
-    ops_dir = base_dir / "operators"
-    heat_ops_dir = ops_dir / "heat"
-    burgers_ops_dir = ops_dir / "burgers"
-    cavity_ops_dir = ops_dir / "cavity"
-    heat_results = base_dir / "heat_test_results"
-    burgers_results = base_dir / "burgers_test_results"
-    cavity_results = base_dir / "cavity_test_results"
-
-    for name, d in [
-        ("heat", heat_ops_dir),
-        ("burgers", burgers_ops_dir),
-        ("cavity", cavity_ops_dir),
-        ("heat", heat_results),
-        ("burgers", burgers_results),
-        ("cavity", cavity_results),
-    ]:
-        if name in equations:
-            d.mkdir(parents=True, exist_ok=True)
+    def method_dirs(eq_name: str, method_name: str):
+        run_dir = base_dir / eq_name / method_name
+        ops = run_dir / "operators"
+        results = run_dir / "results"
+        return run_dir, ops, results
 
     # Heat equation parameters (same as individual workflow)
-    heat_nus = args.heat_nus or [0.5, 1.0, 3.0]
-    heat_model = "src/opinf-llm/heat_model.pkl"
+    heat_nus = args.heat_nus
+    heat_model = "src/heat_model.pkl"
 
     # Burgers equation parameters (same as individual workflow)
     burgers_train_nus = [0.02, 0.05]
-    burgers_test_nus = [0.03, 0.07, 0.12]
-    burgers_model = "src/opinf-llm/burgers_model.pkl"
-    burgers_dataset_train = "src/dataset/burgers_dataset_unified.pkl.gz"
-    burgers_dataset_test = "src/dataset/burgers_dataset_test.pkl.gz"
+    burgers_test_nus = [0.03, 0.07]
+    burgers_model = "src/burgers_model.pkl"
+    burgers_dataset_train = "dataset/burgers_dataset_unified.pkl.gz"
+    burgers_dataset_test = "dataset/burgers_dataset_test.pkl.gz"
 
     # Cavity parameters (same as individual workflow)
-    cavity_model = "src/opinf-llm/cavity_model.pkl"
-    cavity_test_data = "src/dataset/cavity_dataset_test.pkl.gz"
+    cavity_model = "src/cavity_model.pkl"
+    cavity_test_data = "dataset/cavity_dataset_test.pkl.gz"
 
     methods = ["interpolation", "regression"]
 
@@ -269,8 +288,7 @@ def main():
         heat_unseen = [nu for nu in heat_nus if nu not in heat_train_nus]
 
         for method in methods:
-            heat_ops_method = heat_ops_dir / method
-            heat_results_method = heat_results / method
+            _, heat_ops_method, heat_results_method = method_dirs("heat", method)
             heat_ops_method.mkdir(parents=True, exist_ok=True)
             heat_results_method.mkdir(parents=True, exist_ok=True)
 
@@ -282,7 +300,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "src/opinf-llm/llm_tool_calling_interpolation.py",
+                        "src/llm_tool_calling_interpolation.py",
                         "--model_pkl",
                         heat_model,
                         "--query_nu_values",
@@ -325,10 +343,10 @@ def main():
 
             for nu in heat_nus:
                 out_path = resolve_operator_path(heat_ops_method, "llm_heat", nu)
-                heat_dataset_test = "src/dataset/heat_dataset_test.pkl.gz"
+                heat_dataset_test = "dataset/heat_dataset_test.pkl.gz"
                 test_cmd = [
                     sys.executable,
-                    "src/opinf-llm/test_llm_operators.py",
+                    "src/test_llm_operators.py",
                     "--predicted",
                     str(out_path),
                     "--model",
@@ -361,8 +379,7 @@ def main():
         burgers_unseen = [nu for nu in burgers_test_nus if nu not in burgers_train_all]
 
         for method in methods:
-            burgers_ops_method = burgers_ops_dir / method
-            burgers_results_method = burgers_results / method
+            _, burgers_ops_method, burgers_results_method = method_dirs("burgers", method)
             burgers_ops_method.mkdir(parents=True, exist_ok=True)
             burgers_results_method.mkdir(parents=True, exist_ok=True)
 
@@ -374,7 +391,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "src/opinf-llm/llm_tool_calling_interpolation.py",
+                        "src/llm_tool_calling_interpolation.py",
                         "--model_pkl",
                         burgers_model,
                         "--query_nu_values",
@@ -423,7 +440,7 @@ def main():
                     run(
                         [
                             sys.executable,
-                            "src/opinf-llm/test_llm_operators.py",
+                            "src/test_llm_operators.py",
                             "--predicted",
                             str(out_path),
                             "--model",
@@ -446,7 +463,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "src/opinf-llm/test_llm_operators.py",
+                        "src/test_llm_operators.py",
                         "--predicted",
                         str(out_path),
                         "--model",
@@ -464,13 +481,12 @@ def main():
     # Cavity: LLM operators + test (single script handles both)
     if "cavity" in equations:
         for method in methods:
-            cavity_ops_method = cavity_ops_dir / method
-            cavity_results_method = cavity_results / method
+            _, cavity_ops_method, cavity_results_method = method_dirs("cavity", method)
             cavity_ops_method.mkdir(parents=True, exist_ok=True)
             cavity_results_method.mkdir(parents=True, exist_ok=True)
             cavity_cmd = [
                 sys.executable,
-                "src/opinf-llm/cavity_test_utility.py",
+                "src/cavity_test_utility.py",
                 "--model",
                 cavity_model,
                 "--test_data",

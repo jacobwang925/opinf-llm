@@ -24,11 +24,8 @@ Prompts (already generated):
 
 ## How to run (from repo root)
 
-```bash
-LLM_REQUEST_TIMEOUT=120 python src/llm/run_pure_llm_baseline_downsampled.py \
-  --provider openai --model_name gpt-4.1 \
-  --execute --save_plots \
-  --retry_until_success --max_attempts_per_case 10 --retry_on_validation_failure
+```
+LLM_REQUEST_TIMEOUT=120 python llm/run_pure_llm_baseline_downsampled.py   --provider openai --model_name gpt-4.1   --execute --save_plots   --retry_until_success --max_attempts_per_case 10 --retry_on_validation_failure
 ```
 
 Results will be written to `pure_llm_baseline_results_<model>/` in the repo root.

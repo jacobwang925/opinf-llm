@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Codegen-based LLM workflow for Heat, Burgers, and Cavity.
+Structure-guided codegen workflow for Heat, Burgers, and Cavity.
 
-This script asks an LLM to generate local Python code that:
-1) Performs linear regression/interpolation over OpInf operators.
-2) Integrates the ROM to produce a trajectory.
+This variant keeps the same evaluation pipeline as run_three_equations_workflow_codegen.py,
+but nudges generated code to choose physically/ numerically sensible parameter
+features for operator regression (without explicitly prescribing a transform).
 
 Outputs are saved under: codegen/<model>/<equation>/<method>/
 """
@@ -55,6 +55,7 @@ class AttemptResult:
     output_path: Path | None = None
     failure_status: str | None = None
     failure_stage: str | None = None
+    regression_feature: str | None = None
 
 
 def load_pickle_auto(path: str):
@@ -82,6 +83,19 @@ def extract_code(response_text: str) -> str:
         end = response_text.find("```", start)
         return response_text[start:end].strip()
     return response_text.strip()
+
+
+def detect_cavity_regression_feature(code: str) -> str | None:
+    lowered = code.lower()
+    if "def parameter_feature" in lowered or "parameter_feature(" in lowered:
+        if "/re" in lowered or "1.0/re" in lowered or "re**-1" in lowered:
+            return "feature_inverse_like"
+        return "feature_custom_or_raw"
+    if "/re" in lowered or "1.0/re" in lowered or "re**-1" in lowered:
+        return "inverse_like_direct"
+    if re.search(r"\b(re_train|re_query|re)\b", lowered):
+        return "raw_re_like"
+    return None
 
 
 def inject_paths(
@@ -362,6 +376,17 @@ When use_json=True:
 - Use the PKL model ONLY to read x_grid/x_fine for dx.
 - Convert loaded operator lists to numeric arrays with np.asarray(..., dtype=float).
 """
+    path_contract = f"""
+PATH VARIABLE CONTRACT (must follow exactly):
+- Define these exact variables at top-level:
+  model_path = "{model_path}"
+  data_path = "{data_path}"
+  output_path = "{output_path}"
+"""
+    if use_json and coeff_path:
+        path_contract += f'  coeff_path = "{coeff_path}"\n'
+        path_contract += "- Use `coeff_path` consistently for coefficient JSON. Do NOT invent `coeff_json_path` or `COEFF_JSON_PATH`.\n"
+    path_contract += "- Do NOT reference any undefined path variable names.\n"
 
     return f"""You are an expert Python programmer.
 
@@ -373,6 +398,7 @@ Generate Python code to:
 
 USE_JSON={str(use_json)}
 {coeff_block}
+{path_contract}
 
 MODEL STRUCTURE (IMPORTANT):
 - pickle with keys: per_nu_models (list of dicts), phi, x_grid or x_fine, t_eval
@@ -419,6 +445,10 @@ REQUIREMENTS:
 - Lift: Y_rom = phi @ a_rom.
 - Save output with EXACT statement:
   np.savez(output_path, Y_ref=Y_ref, Y_rom=Y_rom, t_eval=t_eval, nu=nu_query)
+- Before returning code, self-check:
+  * every path variable used is defined
+  * no use of coeff_json_path / COEFF_JSON_PATH
+  * np.load(...) uses data_path and np.savez(...) uses output_path
 - Do not print large arrays.
 - Heat-specific shapes: B may be (r,) or (r,1) in training data. Canonicalize with:
   B = np.asarray(B, dtype=float).reshape(-1), and assert B.shape == (r,).
@@ -461,6 +491,14 @@ def build_prompt_cavity(
     extra = ""
     if error_context:
         extra = f"\nPrevious attempt failed with error:\n{error_context}\nFix the issue and regenerate the code."
+    path_contract = f"""
+PATH VARIABLE CONTRACT (must follow exactly):
+- Define these exact variables at top-level:
+  model_path = "{model_path}"
+  data_path = "{data_path}"
+  output_path = "{output_path}"
+- Do NOT reference any undefined path variable names.
+"""
 
     return f"""You are an expert Python programmer.
 
@@ -469,6 +507,7 @@ Generate Python code to:
 2) Load case data from: {data_path}
 3) Compute operators for the query Re using method={method}
 4) Integrate ROM with RK4 and save output to: {output_path}
+{path_contract}
 
 MODEL STRUCTURE (IMPORTANT):
 - pickle with keys: per_Re_models (list of dicts), phi, x, y, t_eval
@@ -496,11 +535,14 @@ REQUIREMENTS:
   Example only (do NOT hard-code):
     output_path = "codegen/gpt-4o/cavity/regression/llm_codegen_cavity_Re120.0_traj2_raw.npz"
 - If Re matches a training Re exactly, use that operator without regression.
-- For method=regression: per-entry linear regression y = a*Re + b.
-  Use numpy only (np.linalg.lstsq or closed form). Do NOT use sklearn.
-- Regression implementation (stable): flatten operator to shape (n_train, n_flat),
-  build X = [Re_train, ones], solve X @ coeffs = op_flat using lstsq.
-  Then op_query_flat = coeffs[0]*Re_query + coeffs[1], reshape to op_shape.
+- For method=regression:
+  * Define a helper parameter feature mapping, e.g. parameter_feature(Re),
+    and use it consistently in regression.
+  * Choose a feature that yields smoother, better-conditioned operator trends.
+  * Use numpy only (np.linalg.lstsq or closed form). Do NOT use sklearn.
+  * Flatten operator to shape (n_train, n_flat), build X=[feature_train, ones],
+    solve X @ coeffs = op_flat, then evaluate at feature_query and reshape.
+  * Include a brief code comment describing why the chosen feature is numerically stable.
 - For method=interpolation: linear interpolation per entry (flatten-interp-reshape).
 - Modal state dimension is r = phi.shape[1]. Integrate a(t) in R^r.
 - Use operators H, A, B, C with quadratic term H(a,a) via einsum:
@@ -515,6 +557,9 @@ REQUIREMENTS:
   np.savez(output_path, Y_omega_fom=Y_omega, Y_psi_fom=Y_psi,
            Y_omega_rom=Y_omega_rom, Y_psi_rom=Y_psi_rom,
            U_lid=U_lid, x=x, y=y, t_eval=t_eval, Re=Re_query)
+- Before returning code, self-check:
+  * every path variable used is defined
+  * np.load(...) uses data_path and np.savez(...) uses output_path
 - Do not print large arrays.
 - Use op_shapes exactly; do not reshape to other sizes.
 - U_lid handling: if U_lid is not length len(t_eval), resample to t_eval using np.interp
@@ -613,6 +658,9 @@ def run_codegen_case(
                         "error": error_context,
                     })
                 else:
+                    regression_feature = None
+                    if equation == "cavity" and method == "regression":
+                        regression_feature = detect_cavity_regression_feature(code)
                     write_attempt(attempt_log, {
                         "equation": equation,
                         "case": case_id,
@@ -621,8 +669,14 @@ def run_codegen_case(
                         "run_id": run_id,
                         "status": "reuse_success",
                         "failure_stage": None,
+                        "regression_feature": regression_feature,
                     })
-                    return AttemptResult(True, code_path=code_path, output_path=Path(output_path))
+                    return AttemptResult(
+                        True,
+                        code_path=code_path,
+                        output_path=Path(output_path),
+                        regression_feature=regression_feature,
+                    )
             else:
                 error_context = f"Expected output not found (reused): {output_path}"
                 last_failure_status = "reuse_missing_output"
@@ -780,6 +834,9 @@ def run_codegen_case(
             })
             continue
 
+        regression_feature = None
+        if equation == "cavity" and method == "regression":
+            regression_feature = detect_cavity_regression_feature(code)
         write_attempt(attempt_log, {
             "equation": equation,
             "case": case_id,
@@ -788,8 +845,14 @@ def run_codegen_case(
             "run_id": run_id,
             "status": "success",
             "failure_stage": None,
+            "regression_feature": regression_feature,
         })
-        return AttemptResult(True, code_path=code_path, output_path=Path(output_path))
+        return AttemptResult(
+            True,
+            code_path=code_path,
+            output_path=Path(output_path),
+            regression_feature=regression_feature,
+        )
 
     return AttemptResult(
         False,
@@ -889,19 +952,21 @@ def main():
     parser.add_argument("--provider", type=str, default="openai",
                         choices=list(DEFAULT_MODEL_BY_PROVIDER.keys()))
     parser.add_argument("--model_name", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default="codegen")
+    parser.add_argument("--output_dir", type=str, default="codegen_struct_runs")
     parser.add_argument("--run_id", type=str, default=None,
                         help="Run identifier. Default: timestamp YYYYMMDD-HHMMSS")
     parser.add_argument("--methods", nargs="+", default=["interpolation", "regression"],
                         choices=["interpolation", "regression"])
     parser.add_argument("--equations", nargs="+", default=["heat", "burgers", "cavity"],
                         choices=["heat", "burgers", "cavity"])
+    parser.add_argument("--use_json_coeffs", action="store_true",
+                        help="Use coefficient JSON files for heat/burgers instead of PKL models.")
     parser.add_argument("--use_pkl_only", action="store_true",
-                        help="Use PKL operators for heat/burgers (legacy behavior).")
+                        help="Deprecated: PKL-only is already the default.")
     parser.add_argument("--heat_coeff", type=str, default="heat_coeff_FIXED.json",
-                        help="Heat coefficient JSON (used unless --use_pkl_only).")
+                        help="Heat coefficient JSON (used only with --use_json_coeffs).")
     parser.add_argument("--burgers_coeff", type=str, default="burgers_coeff_FIXED.json",
-                        help="Burgers coefficient JSON (used unless --use_pkl_only).")
+                        help="Burgers coefficient JSON (used only with --use_json_coeffs).")
     parser.add_argument("--max_attempts_per_case", type=int, default=5)
     parser.add_argument("--sleep_secs", type=float, default=2.0,
                         help="Base sleep (s) after LLM errors; multiplied by attempt index.")
@@ -925,9 +990,16 @@ def main():
     args = parser.parse_args()
 
     model_name = args.model_name or DEFAULT_MODEL_BY_PROVIDER[args.provider]
-    use_json = not args.use_pkl_only
+    use_json = bool(args.use_json_coeffs)
+    if args.use_pkl_only:
+        print("[codegen] --use_pkl_only is deprecated; PKL-only is already default.")
     heat_coeff_path = args.heat_coeff
     burgers_coeff_path = args.burgers_coeff
+    if use_json:
+        missing_coeffs = [p for p in (heat_coeff_path, burgers_coeff_path) if not Path(p).exists()]
+        if missing_coeffs:
+            print(f"[codegen] Coefficient JSON missing ({', '.join(missing_coeffs)}); falling back to PKL-only mode.")
+            use_json = False
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     base_dir = Path(args.output_dir) / model_name / run_id
     attempt_log = base_dir / "attempts.jsonl"
@@ -942,8 +1014,8 @@ def main():
     # Heat/Burgers
     for equation in args.equations:
         if equation in ("heat", "burgers"):
-            model_path = "heat_model.pkl" if equation == "heat" else "burgers_model.pkl"
-            dataset_path = "heat_dataset_test.pkl.gz" if equation == "heat" else "burgers_dataset_test.pkl.gz"
+            model_path = "src/heat_model.pkl" if equation == "heat" else "src/burgers_model.pkl"
+            dataset_path = "dataset/heat_dataset_test.pkl.gz" if equation == "heat" else "dataset/burgers_dataset_test.pkl.gz"
             nus = args.heat_nus if equation == "heat" else args.burgers_nus
 
             model_data = load_pickle_auto(model_path)
@@ -1149,8 +1221,8 @@ def main():
                     }
 
         if equation == "cavity":
-            model_path = "cavity_model_parametric_a0.3_q3.0.pkl"
-            dataset_path = "cavity_dataset_test.pkl.gz"
+            model_path = "src/cavity_model.pkl"
+            dataset_path = "dataset/cavity_dataset_test.pkl.gz"
             model_data = load_pickle_auto(model_path)
             x = model_data["x"]
             dx = x[1] - x[0]
@@ -1251,6 +1323,7 @@ def main():
                                 "failure_stage": result.failure_stage,
                                 "failure_status": result.failure_status,
                                 "error": result.error,
+                                "regression_feature": result.regression_feature,
                             })
                             continue
 
@@ -1293,6 +1366,7 @@ def main():
                                 "failure_stage": None,
                                 "failure_status": None,
                                 "error": None,
+                                "regression_feature": result.regression_feature,
                             })
                         except Exception as exc:
                             write_attempt(attempt_log, {
@@ -1317,6 +1391,7 @@ def main():
                                 "failure_stage": "pipeline_postproc",
                                 "failure_status": "postproc_error",
                                 "error": str(exc),
+                                "regression_feature": result.regression_feature,
                             })
                             continue
 

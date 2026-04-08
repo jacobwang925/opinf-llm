@@ -192,7 +192,7 @@ def run_pipeline(
         run(
             [
                 sys.executable,
-                "cavity_2d_2_train_model_parametric.py",
+                "dataset/cavity_2d_2_train_model_parametric.py",
                 "--dataset",
                 str(dataset),
                 "--n_modes",
@@ -223,7 +223,7 @@ def run_pipeline(
 
         cmd = [
             sys.executable,
-            "cavity_test_utility.py",
+            "src/cavity_test_utility.py",
             "--model",
             str(model_path),
             "--test_data",
@@ -262,8 +262,8 @@ def parse_list(values: str) -> List[float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run cavity-only ablation studies.")
-    parser.add_argument("--dataset", type=str, default="cavity_dataset_train.pkl.gz")
-    parser.add_argument("--test_dataset", type=str, default="cavity_dataset_test.pkl.gz")
+    parser.add_argument("--dataset", type=str, default="dataset/cavity_dataset_train.pkl.gz")
+    parser.add_argument("--test_dataset", type=str, default="dataset/cavity_dataset_test.pkl.gz")
     parser.add_argument("--provider", type=str, default="openai")
     parser.add_argument("--model_name", type=str, default="gpt-4o")
     parser.add_argument("--output_dir_base", type=str, default="cavity_ablation_results")
