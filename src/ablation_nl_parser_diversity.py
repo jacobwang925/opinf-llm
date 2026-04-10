@@ -4,7 +4,7 @@ Ablation: static parser vs LLM parser on diverse natural-language instructions.
 
 Goal:
 - Show whether a naive static parser can robustly interpret diverse/unstructured prompts.
-- Compare against the existing LLM parser used in nl_task_parser.py.
+- Compare against the existing LLM parser used in run_three_equations_workflow_nl.py.
 """
 
 from __future__ import annotations

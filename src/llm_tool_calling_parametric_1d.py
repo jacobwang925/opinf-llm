@@ -863,16 +863,16 @@ def main():
         epilog="""
 Examples:
   # Use GPT-4 with function calling
-  python3 llm_tool_calling_interpolation.py --query_nu 1.0
+  python3 llm_tool_calling_parametric_1d.py --query_nu 1.0
 
   # Specify different model
-  python3 llm_tool_calling_interpolation.py --query_nu 1.0 --model gpt-4o-mini
+  python3 llm_tool_calling_parametric_1d.py --query_nu 1.0 --model gpt-4o-mini
 
   # Use Gemini
-  python3 llm_tool_calling_interpolation.py --query_nu 1.0 --provider gemini --model gemini-2.0-flash-exp
+  python3 llm_tool_calling_parametric_1d.py --query_nu 1.0 --provider gemini --model gemini-2.0-flash-exp
 
   # Batch mode
-  python3 llm_tool_calling_interpolation.py --query_nu_values 0.5 1.0 3.0 --provider gemini --model gemini-2.0-flash-exp
+  python3 llm_tool_calling_parametric_1d.py --query_nu_values 0.5 1.0 3.0 --provider gemini --model gemini-2.0-flash-exp
 """
     )
 

@@ -11,7 +11,7 @@ Heat ROM form: ȧ = C + A·a + B·u
 
 Usage:
     python parametric_heat_2_train_model.py \\
-        --dataset heat_dataset.pkl.gz \\
+        --dataset heat_dataset_train.pkl.gz \\
         --n_modes 6 \\
         --ridge_alpha 1.0 \\
         --output heat_model.pkl
@@ -156,11 +156,68 @@ def main():
     print("\nLoading dataset...")
     dataset = load_dataset(args.dataset)
 
-    config = dataset["config"]
-    nu_values = config["nu_values"]
-    x_grid = dataset["x_grid"]
-    t_eval = dataset["t_eval"]
-    dx = dataset["dx"]
+    # Support both legacy heat dataset format and unified metadata/grid format.
+    if "config" in dataset and "x_grid" in dataset and "t_eval" in dataset:
+        config = dataset["config"]
+        nu_values = config["nu_values"]
+        x_grid = dataset["x_grid"]
+        t_eval = dataset["t_eval"]
+        dx = dataset["dx"]
+
+        normalized_per_nu_data = []
+        for nu_data in dataset["per_nu_data"]:
+            normalized_per_nu_data.append({
+                "nu": nu_data["nu"],
+                "Y_train": nu_data["Y_train"],
+                "U_train": nu_data["U_train"],
+            })
+    else:
+        # Unified format:
+        # {
+        #   "metadata": {...},
+        #   "grid": {"x","t","dx","dt"},
+        #   "per_nu_data": [{"nu", "train", ...}, ...]
+        # }
+        grid = dataset["grid"]
+        metadata = dataset.get("metadata", {})
+        per_nu_raw = dataset["per_nu_data"]
+
+        x_grid = grid["x"]
+        t_eval = grid["t"]
+        dx = grid["dx"]
+        nu_values = [item["nu"] for item in per_nu_raw]
+
+        input_names = metadata.get("input_names", [])
+        default_u_name = input_names[0] if input_names else None
+
+        normalized_per_nu_data = []
+        for item in per_nu_raw:
+            train = item["train"]
+            Y_train = train["Y"]
+            U_dict = train["U"]
+
+            if isinstance(Y_train, list):
+                Y_train_list = Y_train
+            else:
+                Y_train_list = [Y_train]
+
+            if default_u_name and default_u_name in U_dict:
+                U_train = U_dict[default_u_name]
+            else:
+                # Fallback to first available input key.
+                u_key = next(iter(U_dict.keys()))
+                U_train = U_dict[u_key]
+
+            if isinstance(U_train, list):
+                U_train_list = U_train
+            else:
+                U_train_list = [U_train]
+
+            normalized_per_nu_data.append({
+                "nu": item["nu"],
+                "Y_train": Y_train_list,
+                "U_train": U_train_list,
+            })
 
     print(f"✓ Loaded {len(nu_values)} ν values: {nu_values}")
     print(f"  Spatial points: {len(x_grid)}")
@@ -170,7 +227,7 @@ def main():
     print(f"\nComputing joint POD basis ({args.n_modes} modes)...")
 
     all_train_snapshots = []
-    for nu_data in dataset["per_nu_data"]:
+    for nu_data in normalized_per_nu_data:
         for Y_train in nu_data["Y_train"]:
             all_train_snapshots.append(Y_train)
 
@@ -184,7 +241,7 @@ def main():
 
     per_nu_models = []
 
-    for nu_data in dataset["per_nu_data"]:
+    for nu_data in normalized_per_nu_data:
         nu = nu_data["nu"]
         Y_train_list = nu_data["Y_train"]
         U_train_list = nu_data["U_train"]

@@ -4,7 +4,7 @@
 Parse natural-language prompts into structured workflow configs.
 
 This script uses an LLM to convert prompts into a JSON config, then (optionally)
-invokes run_three_equations_workflow.py with the parsed settings.
+invokes run_three_equations_workflow_tool_call.py with the parsed settings.
 """
 
 import argparse
@@ -282,7 +282,7 @@ def main() -> None:
     for config in configs:
         cmd = [
             sys.executable,
-            "src/run_three_equations_workflow.py",
+            "src/run_three_equations_workflow_tool_call.py",
             "--provider",
             config["provider"],
             "--model_name",

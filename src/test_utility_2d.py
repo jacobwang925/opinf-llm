@@ -216,7 +216,7 @@ def main():
             subprocess.run(
                 [
                     sys.executable,
-                    "src/llm_tool_calling_cavity_parametric.py",
+                    "src/llm_tool_calling_parametric_2d.py",
                     "--model",
                     args.model,
                     "--query_Re_values",

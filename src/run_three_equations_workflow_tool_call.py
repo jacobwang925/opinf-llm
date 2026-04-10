@@ -300,7 +300,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "src/llm_tool_calling_interpolation.py",
+                        "src/llm_tool_calling_parametric_1d.py",
                         "--model_pkl",
                         heat_model,
                         "--query_nu_values",
@@ -346,7 +346,7 @@ def main():
                 heat_dataset_test = "dataset/heat_dataset_test.pkl.gz"
                 test_cmd = [
                     sys.executable,
-                    "src/test_llm_operators.py",
+                    "src/test_utility_1d.py",
                     "--predicted",
                     str(out_path),
                     "--model",
@@ -391,7 +391,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "src/llm_tool_calling_interpolation.py",
+                        "src/llm_tool_calling_parametric_1d.py",
                         "--model_pkl",
                         burgers_model,
                         "--query_nu_values",
@@ -440,7 +440,7 @@ def main():
                     run(
                         [
                             sys.executable,
-                            "src/test_llm_operators.py",
+                            "src/test_utility_1d.py",
                             "--predicted",
                             str(out_path),
                             "--model",
@@ -463,7 +463,7 @@ def main():
                 run(
                     [
                         sys.executable,
-                        "src/test_llm_operators.py",
+                        "src/test_utility_1d.py",
                         "--predicted",
                         str(out_path),
                         "--model",
@@ -486,7 +486,7 @@ def main():
             cavity_results_method.mkdir(parents=True, exist_ok=True)
             cavity_cmd = [
                 sys.executable,
-                "src/cavity_test_utility.py",
+                "src/test_utility_2d.py",
                 "--model",
                 cavity_model,
                 "--test_data",

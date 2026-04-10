@@ -18,9 +18,10 @@ import sys
 from pathlib import Path
 from typing import Iterable, List
 
+import numpy as np
 import re
 
-from run_three_equations_workflow import compute_split_errors
+from run_three_equations_workflow_tool_call import compute_split_errors
 
 
 DEFAULT_BURGERS_NUS = [0.03, 0.07]
@@ -111,7 +112,7 @@ def run_burgers_tests(
         dataset = train_dataset if nu in train_set else test_dataset
         cmd = [
             sys.executable,
-            "src/test_llm_operators.py",
+            "src/test_utility_1d.py",
             "--predicted",
             str(pred_path),
             "--model",
@@ -160,6 +161,122 @@ def summarize_burgers_results(model_path: Path, base_dir: Path) -> None:
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Saved split-error summary to: {out_path}")
+
+
+def _model_energy_and_norm(model_path: Path) -> tuple[float | None, float | None]:
+    """Return (energy_percent, mean_operator_norm) for a trained model."""
+    with open(model_path, "rb") as f:
+        model_data = pickle.load(f)
+
+    config = model_data.get("config", {})
+    energy_value = config.get("energy_fraction", config.get("energy_captured"))
+    energy_percent = None
+    if energy_value is not None:
+        energy_value = float(energy_value)
+        energy_percent = float(100.0 * energy_value) if energy_value <= 1.0 else energy_value
+
+    per_nu = model_data.get("per_nu_models", [])
+    if not per_nu:
+        return energy_percent, None
+
+    norms = []
+    for item in per_nu:
+        h_norm = np.linalg.norm(item["H"])
+        a_norm = np.linalg.norm(item["A"])
+        b_norm = np.linalg.norm(item["B"])
+        c_norm = np.linalg.norm(item["C"])
+        norms.append(float(np.sqrt(h_norm**2 + a_norm**2 + b_norm**2 + c_norm**2)))
+    mean_norm = float(np.mean(norms)) if norms else None
+    return energy_percent, mean_norm
+
+
+def _aggregate_burgers_method_errors(summary_obj: dict, method: str) -> dict:
+    """Aggregate per-nu split errors for one method."""
+    method_block = summary_obj.get("burgers", {}).get(method, {})
+    first_vals = []
+    second_vals = []
+    n_traj_total = 0
+    for _, rec in method_block.items():
+        n_traj_total += int(rec.get("n_traj", 0) or 0)
+        mf = rec.get("mean_first")
+        ms = rec.get("mean_second")
+        if mf is not None:
+            first_vals.append(float(mf))
+        if ms is not None:
+            second_vals.append(float(ms))
+    return {
+        "n_traj_total": n_traj_total,
+        "mean_first": float(np.mean(first_vals)) if first_vals else None,
+        "mean_second": float(np.mean(second_vals)) if second_vals else None,
+    }
+
+
+def write_burgers_ablation_tables(output_base: Path, pod_modes: List[int], alpha_values: List[float]) -> None:
+    """Write compact table-like summaries for POD and alpha sweeps."""
+    rows_pod: list[dict] = []
+    rows_alpha: list[dict] = []
+
+    for r in pod_modes:
+        setting_dir = output_base / "pod_modes" / f"pod_{r}"
+        model_path = setting_dir / "burgers_model.pkl"
+        summary_path = setting_dir / "summary_split_errors.json"
+        if not (model_path.exists() and summary_path.exists()):
+            continue
+        with open(summary_path, "r") as f:
+            s = json.load(f)
+        energy_pct, mean_norm = _model_energy_and_norm(model_path)
+        for method in ["interpolation", "regression"]:
+            agg = _aggregate_burgers_method_errors(s, method)
+            if agg["mean_first"] is None and agg["mean_second"] is None:
+                continue
+            rows_pod.append({
+                "equation": "burgers",
+                "method": method,
+                "pod": r,
+                "energy_percent": energy_pct,
+                "mean_operator_norm": mean_norm,
+                "error_first": agg["mean_first"],
+                "error_second": agg["mean_second"],
+                "n_traj_total": agg["n_traj_total"],
+                "setting_dir": str(setting_dir),
+            })
+
+    for alpha in alpha_values:
+        setting_dir = output_base / "alpha" / f"alpha_{safe_tag(alpha)}"
+        model_path = setting_dir / "burgers_model.pkl"
+        summary_path = setting_dir / "summary_split_errors.json"
+        if not (model_path.exists() and summary_path.exists()):
+            continue
+        with open(summary_path, "r") as f:
+            s = json.load(f)
+        energy_pct, mean_norm = _model_energy_and_norm(model_path)
+        for method in ["interpolation", "regression"]:
+            agg = _aggregate_burgers_method_errors(s, method)
+            if agg["mean_first"] is None and agg["mean_second"] is None:
+                continue
+            rows_alpha.append({
+                "equation": "burgers",
+                "method": method,
+                "lambda": alpha,
+                "energy_percent": energy_pct,
+                "mean_operator_norm": mean_norm,
+                "error_first": agg["mean_first"],
+                "error_second": agg["mean_second"],
+                "n_traj_total": agg["n_traj_total"],
+                "setting_dir": str(setting_dir),
+            })
+
+    pod_json = output_base / "pod_modes" / "summary_table.json"
+    alpha_json = output_base / "alpha" / "summary_table.json"
+    pod_json.parent.mkdir(parents=True, exist_ok=True)
+    alpha_json.parent.mkdir(parents=True, exist_ok=True)
+    with open(pod_json, "w") as f:
+        json.dump(rows_pod, f, indent=2)
+    with open(alpha_json, "w") as f:
+        json.dump(rows_alpha, f, indent=2)
+
+    print(f"Saved POD summary table: {pod_json}")
+    print(f"Saved alpha summary table: {alpha_json}")
 
 
 def run_pipeline(
@@ -214,16 +331,16 @@ def run_pipeline(
     unseen_nus = [nu for nu in burgers_nus if nu not in train_nus]
 
     for method in ["interpolation", "regression"]:
-        ops_dir = output_dir / "operators" / "burgers" / method
         results_dir = output_dir / "burgers_test_results" / method
-        ops_dir.mkdir(parents=True, exist_ok=True)
         results_dir.mkdir(parents=True, exist_ok=True)
+        # Save operators directly under results.
+        ops_dir = results_dir
 
         if unseen_nus and not reuse_operators:
             run(
                 [
                     sys.executable,
-                    "src/llm_tool_calling_interpolation.py",
+                    "src/llm_tool_calling_parametric_1d.py",
                     "--model_pkl",
                     str(model_path),
                     "--query_nu_values",
@@ -235,7 +352,7 @@ def run_pipeline(
                     "--method",
                     method,
                     "--output",
-                    str(ops_dir / f"llm_burgers_{method}_batch.json"),
+                    str(results_dir / f"llm_burgers_{method}_batch.json"),
                 ],
                 f"Generate burgers operators (batch, {method})",
                 log_path=log_path,
@@ -264,7 +381,7 @@ def parse_list(values: str) -> List[float]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run burgers-only ablation studies.")
     parser.add_argument("--dataset", type=str, default="dataset/burgers_dataset_unified.pkl.gz")
-    parser.add_argument("--train_dataset", type=str, default="dataset/burgers_dataset_unified.pkl.gz")
+    parser.add_argument("--train_dataset", type=str, default="dataset/burgers_dataset_train.pkl.gz")
     parser.add_argument("--test_dataset", type=str, default="dataset/burgers_dataset_test.pkl.gz")
     parser.add_argument("--provider", type=str, default="openai")
     parser.add_argument("--model_name", type=str, default="gpt-4o")
@@ -320,6 +437,9 @@ def main() -> None:
             reuse_operators=args.reuse_operators,
             save_raw=args.save_raw,
         )
+
+    # Aggregate table-like summaries across settings for paper/reporting.
+    write_burgers_ablation_tables(output_base, pod_modes, alpha_values)
 
 
 if __name__ == "__main__":
