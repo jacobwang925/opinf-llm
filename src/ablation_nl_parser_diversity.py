@@ -11,18 +11,142 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional
 
-from nl_task_parser import normalize_config, parse_prompt_with_llm
+from llm_tool_calling_provider import call_llm_text
+
+try:
+    from load_env import load_env
+    load_env()
+except ImportError:
+    pass
 
 
 EQUATION_CHOICES = {"heat", "burgers", "cavity"}
+DEFAULT_MODEL_BY_PROVIDER = {
+    "openai": "gpt-4o",
+    "gemini": "gemini-2.0-flash-exp",
+    "deepseek": "deepseek-chat",
+    "anthropic": "claude-sonnet-4-20250514",
+    "qwen": "qwen-plus",
+}
 DEFAULT_PROVIDER = "openai"
 DEFAULT_MODEL = "gpt-4o"
 DEFAULT_OUTPUT_BASE = "ablation_nl_parser_runs"
+
+
+def _parse_json_from_text(text: Any) -> Optional[Dict[str, Any]]:
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def parse_prompt_with_llm(prompt: str, provider: str, model: str) -> Dict[str, Any]:
+    schema = {
+        "equations": ["heat", "burgers", "cavity"],
+        "provider": "openai|gemini|deepseek|anthropic|qwen",
+        "model_name": "string or null",
+        "output_dir": "string or null",
+        "save_raw": "true/false",
+        "reuse_operators": "true/false",
+        "heat_nus": "list of numbers or null",
+        "burgers_nus": "list of numbers or null",
+        "cavity_res": "list of numbers or null",
+    }
+    system = "You are a strict parser. Return JSON only. Do not include code fences."
+    user = (
+        "Parse the prompt into the following JSON keys. Use lowercase for equations.\n"
+        f"Schema: {json.dumps(schema)}\n"
+        f"Prompt: {prompt}"
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    text = call_llm_text(provider, messages, model)
+    return _parse_json_from_text(text) or {}
+
+
+def normalize_config(
+    parsed: Dict[str, Any],
+    default_provider: str,
+    default_model: Optional[str],
+    output_dir_base: str,
+    index: int,
+    default_save_raw: bool,
+    default_reuse: bool,
+) -> Dict[str, Any]:
+    def _coerce_bool(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "y", "1"}:
+                return True
+            if lowered in {"false", "no", "n", "0"}:
+                return False
+        return None
+
+    equations = parsed.get("equations") or ["heat", "burgers", "cavity"]
+    if isinstance(equations, str):
+        equations = [equations]
+    equations = [e.lower().strip() for e in equations if e]
+    equations = [e for e in equations if e in EQUATION_CHOICES]
+    if not equations:
+        equations = ["heat", "burgers", "cavity"]
+
+    provider = (parsed.get("provider") or default_provider or "openai").lower()
+    model_name = parsed.get("model_name") or default_model or DEFAULT_MODEL_BY_PROVIDER.get(provider)
+    output_dir = parsed.get("output_dir") or os.path.join(output_dir_base, f"prompt_{index:02d}")
+    save_raw = _coerce_bool(parsed.get("save_raw"))
+    if save_raw is None:
+        save_raw = default_save_raw
+    reuse_operators = _coerce_bool(parsed.get("reuse_operators"))
+    if reuse_operators is None:
+        reuse_operators = default_reuse
+
+    return {
+        "equations": equations,
+        "provider": provider,
+        "model_name": model_name,
+        "output_dir": output_dir,
+        "save_raw": bool(save_raw),
+        "reuse_operators": bool(reuse_operators),
+        "heat_nus": parsed.get("heat_nus"),
+        "burgers_nus": parsed.get("burgers_nus"),
+        "cavity_res": parsed.get("cavity_res"),
+    }
 
 
 @dataclass
