@@ -4,7 +4,7 @@
 
 Official implementation of the paper ["OpInf-LLM: Parametric PDE Solving with LLMs via Operator Inference"](https://arxiv.org/abs/2602.01493).
 
-
+![diagram](plots/diagram.png)
 
 ## Repository structure
 
