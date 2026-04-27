@@ -1,4 +1,4 @@
-# opinf-llm
+# OpInf-LLM
 
 This folder contains the code and artifacts needed to run the **OpInf-LLM** workflows:
 - three‑equation workflow (tool‑calling)
@@ -87,7 +87,13 @@ python ablation_nl_parser_diversity.py \
 ```
 
 ### Equation-specific OpInf ablations
-# Heat ablation
+
+
+
+
+
+#### Heat ablation
+
 ```
 python src/run_heat_ablation.py \
   --provider openai \
@@ -96,7 +102,10 @@ python src/run_heat_ablation.py \
   --save_raw
 ```
 
-# Burgers ablation
+
+
+#### Burgers ablation
+
 ```
 python src/run_burgers_ablation.py \
   --provider openai \
@@ -105,7 +114,10 @@ python src/run_burgers_ablation.py \
   --save_raw
 ```
 
-# Cavity ablation
+
+
+#### Cavity ablation
+
 ```
 python src/run_cavity_ablation.py \
   --provider openai \
@@ -115,7 +127,9 @@ python src/run_cavity_ablation.py \
 ```
 
 
+
 ## Environment
+
 - Ensure `.env` contains API keys (OPENAI_API_KEY, etc.).
 
 ## Datasets
